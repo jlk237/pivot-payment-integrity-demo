@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PIVOT — Payment Integrity Validation & Oversight Tool</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.24.0/dist/tabler-icons.min.css" rel="stylesheet">
+<link href="assets/styles.css" rel="stylesheet">
+</head>
+<body>
+  <div class="banner"><i class="ti ti-alert-triangle"></i><span id="disclaimer">Synthetic data — for demonstration only.</span></div>
+  <div class="topnav">
+    <div style="display:flex;align-items:center">
+      <div class="brand">
+        <svg width="22" height="22" viewBox="0 0 42 42" aria-hidden="true"><circle cx="12" cy="14" r="5" fill="none" stroke="#5fd0c8" stroke-width="3"/><circle cx="30" cy="12" r="4" fill="none" stroke="#8aa4c0" stroke-width="3"/><circle cx="24" cy="30" r="6" fill="#17b3a6"/><line x1="16" y1="15" x2="24" y2="28" stroke="#5fd0c8" stroke-width="3"/></svg>
+        <span class="brand-name">PIVOT</span>
+      </div>
+      <div class="navitems">
+        <button class="navitem active" data-area="home">Home</button>
+        <button class="navitem" data-area="casework">Casework <span id="sup-badge" class="tag" style="background:#c77d11;color:#fff;display:none;margin-left:2px">0</span></button>
+        <button class="navitem" data-area="insights">Insights</button>
+        <button class="navitem" data-area="library">Library</button>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="mode-toggle" title="Prepay = pre-payment triage · Retrospective = post-payment review" style="display:flex;background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.2);border-radius:20px;padding:2px">
+        <button class="modebtn" data-mode="prepay"><i class="ti ti-clock-play"></i> Prepay</button>
+        <button class="modebtn active" data-mode="retrospective"><i class="ti ti-history"></i> Retrospective</button>
+      </div>
+      <button id="gsearch" title="Search (/)" style="background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.2);border-radius:7px;color:#cfe0f0;cursor:pointer;padding:5px 10px;display:flex;align-items:center;gap:6px;font-size:12px;font-family:inherit"><i class="ti ti-search"></i><span style="color:#93a7bf">Search</span></button>
+      <button id="reset-demo" title="Reset the demo to its initial data" style="background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.2);border-radius:7px;color:#cfe0f0;cursor:pointer;padding:5px 10px;display:flex;align-items:center;gap:6px;font-size:12px;font-family:inherit"><i class="ti ti-refresh"></i><span style="color:#93a7bf">Reset</span></button>
+      <span class="conn"><span class="d"></span>Snapshot loaded</span>
+      <button id="role-switch" title="Switch role" style="background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.2);border-radius:20px;padding:3px 8px 3px 12px;display:flex;align-items:center;gap:8px;cursor:pointer;color:#fff;font-family:inherit">
+        <div style="text-align:right;line-height:1.15"><div id="role-name" style="font-size:12px;font-weight:500">Dana Whitmore</div><div id="role-title" style="font-size:10px;color:#93a7bf">Analyst</div></div>
+        <div class="avatar" id="role-avatar">DW</div>
+        <i class="ti ti-switch-horizontal" style="color:#93a7bf;font-size:14px"></i>
+      </button>
+    </div>
+  </div>
+  <div id="demo-ribbon" style="background:#0b1c2e;border-bottom:1px solid rgba(255,255,255,0.08);position:sticky;top:52px;z-index:40;display:none"></div>
+  <div id="subnav" style="background:var(--card);border-bottom:0.5px solid var(--border);display:none"></div>
+  <div id="view"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+  <script src="assets/data.js"></script>
+  <script src="assets/provider.js"></script>
+  <script src="assets/collusion.js"></script>
+  <script src="assets/export.js"></script>
+  <script src="assets/ai.js"></script>
+  <script src="assets/views/home.js"></script>
+  <script src="assets/views/queue.js"></script>
+  <script src="assets/views/claim.js"></script>
+  <script src="assets/views/network.js"></script>
+  <script src="assets/views/businesses.js"></script>
+  <script src="assets/views/analytics.js"></script>
+  <script src="assets/views/provider.js"></script>
+  <script src="assets/views/investigations.js"></script>
+  <script src="assets/views/team.js"></script>
+  <script src="assets/views/heatmap.js"></script>
+  <script src="assets/views/rules.js"></script>
+  <script src="assets/views/supervisor.js"></script>
+  <script src="assets/views/audit.js"></script>
+  <script src="assets/app.js"></script>
+  <script src="assets/config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="assets/supabase.js"></script>
+  <script src="assets/search.js"></script>
+  <script src="assets/copilot-panel.js"></script>
+  <script src="assets/demo.js"></script>
+</body>
+</html>
