@@ -1,0 +1,10 @@
+{
+  "name": "pivot-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "VA PIVOT — payment-integrity demo UI (synthetic data). VA x IBM.",
+  "scripts": {
+    "gen:data": "node scripts/generate-data.mjs"
+  }
+}
