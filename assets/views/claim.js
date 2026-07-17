@@ -9,6 +9,20 @@
     return window.DP.listProviders().filter(function (p) { return p.tin === prov.tin; }).length > 1;
   }
 
+  // ---------- exposure ----------
+  // "Exposure amount" is the money at issue. Which money that is depends on the
+  // exposure type: pre-pay = the allowed amount still at risk (nothing has been
+  // paid yet), post-pay = what already went out the door and is recoverable.
+  function exposureType(a) { return a.mode === "prepay" ? "Pre-pay" : "Post-pay"; }
+  function exposureOf(a) { return (a.mode === "prepay" ? a.exposurePre : a.exposurePost) || 0; }
+  // Per claim line: pre-pay lines have paid === 0, so the at-risk figure is the allowed amount.
+  function lineExposure(l, prepay) { return prepay ? (l.allowed || 0) : (l.paid || 0); }
+  function exposureTypePill(a) {
+    var pre = a.mode === "prepay";
+    return '<span class="pill ' + (pre ? "p-esc" : "p-asg") + '" title="' + (pre ? "Pre-payment — the claim is pending; this money has not been paid yet" : "Post-payment — this money has already been paid and is recoverable if confirmed") + '">' +
+      '<i class="ti ti-' + (pre ? "shield-half" : "receipt-2") + '" style="font-size:11px"></i> ' + exposureType(a) + '</span>';
+  }
+
   window.Views.claim = {
     render: function (mount, params) {
       var id = params.id || window.APP.state.allegationId;
@@ -34,6 +48,7 @@
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">' +
         '<span class="btn" id="c-back" style="padding:5px 9px"><i class="ti ti-arrow-left"></i> ' + window.APP.esc(window.APP.backLabel()) + '</span>' +
         '<span class="page-title">' + window.APP.esc(headText) + '</span><span id="c-status">' + window.UI.statusPill(prepay ? a.status : window.UI.leadStatus(a)) + '</span>' +
+        exposureTypePill(a) +
         '<span style="font-size:11px;color:var(--text2);display:inline-flex;align-items:center;gap:4px"><i class="ti ti-lock"></i> Locked to you</span>' +
         '<span style="flex:1"></span>' + window.EXPORT.group("c") + '<button class="btn primary" id="c-summarize" style="font-size:12px"><i class="ti ti-file-analytics"></i> Summarize for adjudication</button></div>' +
         '<div class="split" style="display:flex;gap:12px;align-items:flex-start">' +
@@ -50,11 +65,11 @@
         '<div class="card"><div class="l" style="font-size:10.5px;color:var(--text2);margin-bottom:7px">Evidence on file</div>' +
         '<div id="c-docs" style="display:flex;flex-direction:column;gap:5px">' + docsHtml + '</div>' +
         '<div id="c-doc" style="margin-top:8px"></div>' +
-        '<button class="btn" id="c-req" style="margin-top:8px;width:100%;font-size:11px"><i class="ti ti-plus"></i>Request additional records</button>' +
-        '<div id="c-support" style="margin-top:6px"></div></div>' +
+        '<div id="c-support" style="margin-top:8px">' + recordsPanelHtml(id, a) + '</div></div>' +
         '</div>' +
         // ---- main column: tabs ----
         '<div style="flex:1;min-width:0">' +
+        milestoneHtml(a, dec, prepay) +
         tabBar(curTab, undecided) +
         '<div id="c-tabpanel"></div>' +
         notesCardHtml(id) +
@@ -73,23 +88,11 @@
           window.APP.auditLog(key === "mr" ? "MEDICAL_RECORD_VIEWED" : "EVIDENCE_VIEWED", kind + " #" + id + (key === "mr" ? "" : " · " + key));
         });
       });
-      document.getElementById("c-req").addEventListener("click", function () {
-        var saved = (window.APP.state.recordsRequestText || {})[id];
-        var def = saved || defaultRecordsRequest(a);
-        document.getElementById("c-support").innerHTML =
-          '<div style="background:var(--surface);border:0.5px solid var(--border);border-radius:7px;padding:8px 9px">' +
-          '<div style="font-size:10.5px;color:var(--text2);margin-bottom:4px">Records to request <span style="color:var(--text3)">(editable per case)</span></div>' +
-          '<textarea id="c-req-text" class="input" style="min-height:54px;font-size:11.5px">' + window.APP.esc(def) + '</textarea>' +
-          '<button class="btn primary" id="c-req-send" style="margin-top:6px;width:100%;font-size:11px"><i class="ti ti-send"></i> Send request to provider</button></div>';
-        document.getElementById("c-req-send").addEventListener("click", function () {
-          var txt = document.getElementById("c-req-text").value.trim() || def;
-          (window.APP.state.recordsRequestText = window.APP.state.recordsRequestText || {})[id] = txt;
-          window.APP.auditLog("RECORDS_REQUESTED", kind + " #" + id + " · " + txt);
-          document.getElementById("c-support").innerHTML = '<div style="background:var(--surface);border:0.5px solid var(--border);border-radius:7px;padding:7px 9px;font-size:11px;color:var(--text2)"><i class="ti ti-clock"></i> Requested from provider: <span style="color:var(--ink)">' + window.APP.esc(txt) + '</span></div>';
-        });
-      });
+      wireRecords(id, a);
       var sumBtn = document.getElementById("c-summarize");
       if (sumBtn) sumBtn.addEventListener("click", function () { if (window.COPILOT) window.COPILOT.summarize(id); });
+      var msHist = document.getElementById("c-ms-hist");
+      if (msHist) msHist.addEventListener("click", function () { showTab("history"); });
       wireExport(id, a, cl, p, prepay, kind);
       mount.querySelectorAll(".ctab").forEach(function (b) { b.addEventListener("click", function () { showTab(b.getAttribute("data-tab")); }); });
 
@@ -112,9 +115,53 @@
     }
   };
 
+  // ---------- milestone bar ----------
+  // Where this lead sits in its lifecycle, plus what happened last. A lead that
+  // is confirmed/escalated ends at "Pending Case"; a dismissed one is terminal at
+  // the decision; a returned one is sent back to the analyst.
+  function milestoneModel(a, dec, prepay) {
+    if (prepay) {
+      var pd = window.APP.prepayDecisionFor(a.id);
+      var out = pd ? { pay: "Cleared to pay", hold: "On hold", deny: "Denied" }[pd.action] : "Payment outcome";
+      return { steps: ["Flagged", "Assigned", "Under review", "Triage decision", out], cur: pd ? 5 : (a.assignee ? 2 : 1), note: null };
+    }
+    var steps = ["Flagged", "Assigned", "Under review", "Decision", "Supervisor review", "Pending Case"];
+    if (!dec) return { steps: steps, cur: a.assignee ? 2 : 1, note: null };
+    // returned: the analyst owns it again, so Decision is the live step
+    if (dec.reviewState === "returned") return { steps: steps, cur: 4, note: "Returned by the supervisor — revise and resubmit." };
+    if (dec.outcome === "dismiss") return { steps: ["Flagged", "Assigned", "Under review", "Decision", "Dismissed"], cur: 5, note: "Dismissed as a false positive — analyst-final, no supervisor review." };
+    // pending: the decision is made and the supervisor is the live step
+    if (dec.reviewState === "pending") return { steps: steps, cur: 5, note: "Awaiting supervisor review (Karen Boyd)." };
+    return { steps: steps, cur: 6, note: dec.outcome === "escalate" ? "Escalated into a case." : "Confirmed — recovery submitted; the lead now feeds its case." };
+  }
+  function milestoneHtml(a, dec, prepay) {
+    var m = milestoneModel(a, dec, prepay);
+    var last = window.APP.lastActionFor(a.id);
+    var dots = m.steps.map(function (label, i) {
+      var done = i < m.cur - 1, cur = i === m.cur - 1;
+      var bg = done ? "var(--accent)" : cur ? "#fff" : "var(--border2)";
+      var bd = done ? "var(--accent)" : cur ? "var(--accent)" : "var(--border)";
+      var inner = done ? '<i class="ti ti-check" style="color:#fff;font-size:10px"></i>' : cur ? '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);display:block"></span>' : '';
+      return '<div style="display:flex;align-items:center;flex:' + (i === m.steps.length - 1 ? "none" : "1") + ';min-width:0">' +
+        '<div style="display:flex;flex-direction:column;align-items:center;gap:3px;flex:none">' +
+        '<div style="width:16px;height:16px;border-radius:50%;background:' + bg + ';border:1.5px solid ' + bd + ';display:flex;align-items:center;justify-content:center">' + inner + '</div>' +
+        '<span style="font-size:10px;white-space:nowrap;color:' + (done || cur ? "var(--ink)" : "var(--text3)") + ';font-weight:' + (cur ? "600" : "400") + '">' + window.APP.esc(label) + '</span></div>' +
+        (i === m.steps.length - 1 ? '' : '<div style="flex:1;height:1.5px;background:' + (done ? "var(--accent)" : "var(--border2)") + ';margin:0 6px;margin-bottom:15px"></div>') +
+        '</div>';
+    }).join("");
+    var lastHtml = last
+      ? '<i class="ti ti-' + ((HIST_ICON[last.action] || ["point"])[0]) + '" style="color:var(--accent-d)"></i> <span style="color:var(--text2)">Last action:</span> <span style="font-weight:500">' + window.APP.esc(histLabel(last.action)) + '</span> <span style="color:var(--text2)">· ' + window.APP.esc(last.user || "—") + ' · ' + window.APP.fmtTs(last.ts) + '</span> <span id="c-ms-hist" style="color:var(--accent-d);cursor:pointer;margin-left:4px">View history →</span>'
+      : '<span style="color:var(--text2)">No activity recorded yet.</span>';
+    return '<div class="card" style="padding:10px 14px 8px;margin-bottom:12px">' +
+      '<div style="display:flex;align-items:flex-start;padding:0 2px 4px">' + dots + '</div>' +
+      '<div style="border-top:0.5px solid var(--border2);margin-top:6px;padding-top:6px;font-size:11.5px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' + lastHtml + '</div>' +
+      (m.note ? '<div style="font-size:11px;color:var(--text2);padding-top:4px"><i class="ti ti-info-circle"></i> ' + window.APP.esc(m.note) + '</div>' : '') +
+      '</div>';
+  }
+
   // ---------- tabs ----------
   function tabBar(active, undecided) {
-    var tabs = [["overview", "Overview"], ["evidence", "Evidence"], ["pricing", "Pricing"], ["utilization", "Utilization"], ["analysis", "Analysis"], ["network", "Network"], ["decision", "Decision"]];
+    var tabs = [["overview", "Overview"], ["evidence", "Evidence"], ["coding", "Coding"], ["pricing", "Pricing"], ["utilization", "Utilization"], ["analysis", "Analysis"], ["network", "Network"], ["similar", "Similar cases"], ["history", "History"], ["decision", "Decision"]];
     return '<div style="display:flex;flex-wrap:wrap;gap:2px;border-bottom:0.5px solid var(--border);margin-bottom:10px">' +
       tabs.map(function (t) { return '<button class="ctab' + (t[0] === active ? " active" : "") + '" data-tab="' + t[0] + '">' + t[1] + (t[0] === "decision" && undecided ? ' <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);vertical-align:middle;margin-left:2px"></span>' : "") + '</button>'; }).join("") +
       '</div>';
@@ -162,16 +209,19 @@
     var panel = document.getElementById("c-tabpanel"); if (!panel || !ctx) return;
     document.querySelectorAll(".ctab").forEach(function (b) { b.classList.toggle("active", b.getAttribute("data-tab") === name); });
     if (name === "overview") { panel.innerHTML = overviewHtml(ctx.a, ctx.prepay); var ovd = document.getElementById("c-ov-decide"); if (ovd) ovd.onclick = function () { showTab("decision"); }; wireWorkingRecord(ctx.id); wirePeerStats(ctx.a); }
-    else if (name === "evidence") { panel.innerHTML = evidenceHtml(ctx.a, ctx.cl); wireEvidenceUploads(ctx.id); wireEvidenceDocs(ctx.id, ctx.a, ctx.cl); wireClaimLines(panel); }
-    else if (name === "pricing") { panel.innerHTML = pricingHtml(ctx.a, ctx.cl); }
+    else if (name === "evidence") { panel.innerHTML = evidenceHtml(ctx.a, ctx.cl); wireEvidenceUploads(ctx.id); wireEvidenceDocs(ctx.id, ctx.a, ctx.cl); wireClaimLines(panel); wireArtifacts(panel); }
+    else if (name === "coding") { panel.innerHTML = xwalkHtml(ctx.a, ctx.cl); }
+    else if (name === "pricing") { panel.innerHTML = pricingHtml(ctx.a, ctx.cl); wirePricingVersions(panel); }
     else if (name === "utilization") { panel.innerHTML = umHtml(ctx.a, ctx.cl); }
     else if (name === "analysis") { panel.innerHTML = analysisHtml(ctx.a); var rc = document.getElementById("c-openrc"); if (rc) rc.onclick = function () { window.APP.openProvider(ctx.p.id); }; }
     else if (name === "network") { panel.innerHTML = networkHtml(); renderCollusion(ctx.p, ctx.id); }
+    else if (name === "similar") { panel.innerHTML = similarHtml(ctx.a); wirePrecedents(ctx.id); }
+    else if (name === "history") { panel.innerHTML = historyHtml(ctx.id); }
     else if (name === "decision") {
       panel.innerHTML = decisionHtml(ctx.id, ctx.a, ctx.cl);
       if (ctx.prepay) renderPrepayDecision(ctx.id, ctx.a);
       else renderDecision(ctx.id, ctx.a, window.APP.decisionFor(ctx.id));
-      wirePrecedents(ctx.id);
+      var gs = document.getElementById("c-gosim"); if (gs) gs.onclick = function () { showTab("similar"); };
     }
   }
 
@@ -188,7 +238,7 @@
       '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px">' +
       stat("Risk", '<span style="color:' + bandColor(a.riskScore) + '">' + a.riskScore + ' <span style="font-size:10px;font-weight:500">' + bandLabel(a.riskScore) + '</span></span>') +
       stat("Confidence", a.confidence + "%") +
-      stat(prepay ? "At risk" : "Exposure", window.DP.usd(prepay ? a.exposurePre : a.exposurePost)) +
+      stat("Exposure amount", window.DP.usd(exposureOf(a)) + ' <span style="font-size:10px;font-weight:500;color:var(--text2)">' + exposureType(a) + '</span>') +
       stat("Source", '<span style="font-size:12.5px">' + window.APP.esc(a.source === "Both" ? "ML/AI + Rules" : window.DP.sourceOf(a)) + '</span>' + (a.manual ? ' <span class="tag" style="background:var(--med-bg);color:var(--med-tx)">manual</span>' : '')) +
       stat("FWA type", '<span style="font-size:12.5px">' + a.fwaType + '</span>') +
       '</div>' +
@@ -270,12 +320,12 @@
     var p = a.provider || {}, cl = a.claim, ve = a.veteran, id = a.id;
     var fields = [
       { f: "tin", label: "TIN", rec: p.tin || "", type: "text" },
-      { f: "exposure", label: prepay ? "At-risk amount" : "Exposure", rec: (prepay ? a.exposurePre : a.exposurePost) || 0, type: "money" }
+      { f: "exposure", label: "Exposure amount", rec: exposureOf(a), type: "money" }
     ];
     if (cl) {
       fields.push({ f: "billed", label: "Billed", rec: cl.billedAmount || 0, type: "money" });
       fields.push({ f: "allowed", label: "Allowed", rec: cl.allowedAmount || 0, type: "money" });
-      fields.push({ f: "paid", label: "Paid", rec: cl.paidAmount || 0, type: "money" });
+      fields.push({ f: "paid", label: prepay ? "Claim exposure (at risk)" : "Claim exposure (paid)", rec: prepay ? (cl.allowedAmount || 0) : (cl.paidAmount || 0), type: "money" });
       fields.push({ f: "claimNumber", label: "Claim #", rec: cl.claimNumber || "", type: "text" });
     }
     fields.push({ f: "providerName", label: "Provider", rec: p.name || "", type: "text" });
@@ -328,18 +378,19 @@
     var ruleIx = {}; (window.DP.getRules() || []).forEach(function (r) { ruleIx[r.id] = r; });
     // Every claim line is shown — flagged AND clean — and each expands for detail.
     // (The whole claim is held while the lead is open, regardless of which lines fired.)
+    var prepay = a.mode === "prepay";
     var lines = cl ? cl.lines.map(function (l, i) {
       var flagged = (l.violatesRuleIds || []).length > 0;
       var main = '<tr class="cl-line' + (flagged ? ' flag-row' : '') + '" data-i="' + i + '" style="cursor:pointer">' +
         '<td class="mono">' + l.cpt + '</td><td>' + window.APP.esc(l.description) + '</td>' +
         '<td>' + (l.modifiers.length ? '<span class="mono" style="background:var(--high-bg);color:var(--high-tx);padding:1px 5px;border-radius:4px">' + l.modifiers.join(",") + '</span>' : '—') + '</td>' +
-        '<td class="right">' + l.units + '</td><td class="right">$' + l.billed + '</td><td class="right">$' + l.paid + '</td>' +
+        '<td class="right">' + l.units + '</td><td class="right">$' + l.billed + '</td><td class="right">$' + lineExposure(l, prepay) + '</td>' +
         '<td style="font-size:10.5px;white-space:nowrap">' + (flagged ? '<span style="color:var(--high-tx)"><i class="ti ti-flag"></i> flagged</span>' : '<span style="color:var(--text3)">clean</span>') + ' <i class="ti ti-chevron-down cl-caret" style="color:var(--text3);font-size:13px;vertical-align:middle"></i></td></tr>';
       var ruleNames = (l.violatesRuleIds || []).map(function (rid) { var r = ruleIx[rid]; return r ? r.name + " (" + r.code + ")" : rid; });
       var detail = '<tr class="cl-detail" data-i="' + i + '" style="display:none"><td colspan="7" style="background:var(--surface);padding:9px 12px">' +
         '<div style="font-size:11.5px;color:var(--text2);line-height:1.7">' +
         '<b>Line ' + (i + 1) + '</b> · CPT <span class="mono">' + l.cpt + '</span> — ' + window.APP.esc(l.description) + '<br>' +
-        'Billed ' + window.DP.usd(l.billed) + ' · Allowed ' + window.DP.usd(l.allowed || 0) + ' · Paid ' + window.DP.usd(l.paid) + ' · Units ' + l.units +
+        'Billed ' + window.DP.usd(l.billed) + ' · Allowed ' + window.DP.usd(l.allowed || 0) + ' · Exposure ' + window.DP.usd(lineExposure(l, prepay)) + ' (' + exposureType(a).toLowerCase() + ') · Units ' + l.units +
         (l.modifiers && l.modifiers.length ? ' · Modifiers ' + l.modifiers.join(", ") : '') + '<br>' +
         (flagged
           ? '<span style="color:var(--high-tx)"><i class="ti ti-flag"></i> Flagged by: ' + window.APP.esc(ruleNames.join("; ") || (a.model ? a.model.name : "the ML/AI models")) + '</span>'
@@ -356,8 +407,8 @@
       : '<div style="font-size:11.5px;color:var(--text2)">No rules fired — behavioral anomaly flagged by ' + (a.model ? window.APP.esc(a.model.name) : "the ML/AI models") + '.</div>';
     return '<div style="display:flex;flex-direction:column;gap:10px">' +
       (cl ? '<div class="card" style="padding:0;overflow:hidden"><div style="padding:9px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:0.5px solid var(--border2)"><span style="font-weight:500;font-size:13px">Claim <span class="mono" style="font-weight:400;color:var(--text2)">' + cl.claimNumber + '</span></span><span style="font-size:11px;color:var(--text2)">' + cl.type + ' · DOS ' + cl.dateOfService + ' · Dx ' + (cl.diagnosisCodes.join(",") || "—") + ' · ' + cl.claimStatus + ' / ' + cl.paymentType + '</span></div>' +
-        '<table><thead><tr><th>CPT</th><th>Description</th><th>Mod</th><th class="right">Units</th><th class="right">Billed</th><th class="right">Paid</th><th>Status</th></tr></thead><tbody>' + lines + '</tbody></table>' +
-        '<div style="padding:7px 12px;font-size:10.5px;color:var(--text3);border-top:0.5px solid var(--border2)"><i class="ti ti-info-circle"></i> All ' + cl.lines.length + ' claim lines shown — flagged and clean. Click any line to expand its detail; the whole claim is held while the lead is open.</div></div>' : '') +
+        '<table><thead><tr><th>CPT</th><th>Description</th><th>Mod</th><th class="right">Units</th><th class="right">Billed</th><th class="right">Exposure</th><th>Status</th></tr></thead><tbody>' + lines + '</tbody></table>' +
+        '<div style="padding:7px 12px;font-size:10.5px;color:var(--text3);border-top:0.5px solid var(--border2)"><i class="ti ti-info-circle"></i> Exposure is ' + (prepay ? "the allowed amount still at risk — this claim is pre-payment, nothing has been paid" : "what was already paid on each line — post-payment, recoverable if confirmed") + '. All ' + cl.lines.length + ' claim lines shown — flagged and clean. Click any line to expand its detail; the whole claim is held while the lead is open.</div></div>' : '') +
       '<div class="card"><div style="font-weight:500;font-size:13px;margin-bottom:8px">Rule engine outcomes</div><div style="display:flex;flex-direction:column;gap:7px">' + rulesHtml + '</div></div>' +
       '<div class="card"><div style="font-weight:500;font-size:13px;margin-bottom:8px"><i class="ti ti-folder-open" style="color:var(--accent-d)"></i> Evidence on file <span class="muted" style="font-weight:400;font-size:11px">· click a record to review it</span></div>' +
       '<div style="display:flex;flex-direction:column;gap:6px">' + evidenceDocs(a, cl).map(function (d) { return docRowHtml(d, "ev-doc-row"); }).join("") + '</div>' +
@@ -408,16 +459,146 @@
     return '<div style="display:flex;flex-direction:column;gap:10px">' +
       '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div style="font-weight:500;font-size:13px"><i class="ti ti-currency-dollar" style="color:var(--accent-d)"></i> CMS pricing comparison <span class="muted" style="font-weight:400;font-size:11px">· submitted charge vs CMS-allowed</span></div>' +
       '<span class="tag" style="background:var(--surface)"><i class="ti ti-plug-connected"></i> ' + window.APP.esc(d.source) + '</span></div><div style="font-size:11px;color:var(--text2);margin-top:4px">' + d.asOf + ' · ' + window.APP.esc(d.locality) + '</div></div>' +
-      '<div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>CPT</th><th>Description</th><th class="right">Submitted</th><th class="right">CMS allowed</th><th class="right">Paid</th><th class="right">Variance</th><th>Methodology</th></tr></thead><tbody>' + rows +
+      '<div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>CPT</th><th>Description</th><th class="right">Submitted</th><th class="right">CMS allowed</th><th class="right">Exposure</th><th class="right">Variance</th><th>Methodology</th></tr></thead><tbody>' + rows +
       '<tr style="font-weight:600;border-top:1px solid var(--border)"><td colspan="2">Claim total</td><td class="right">' + m(d.totals.submitted) + '</td><td class="right">' + m(d.totals.cmsAllowed) + '</td><td class="right">' + m(d.totals.paid) + '</td><td class="right" style="color:var(--high-tx)">+' + m(d.totals.variance) + '</td><td></td></tr></tbody></table></div>' +
-      (d.totals.overpayment > 0 ? '<div style="background:var(--high-bg);border:0.5px solid #f3c9c9;border-radius:7px;padding:9px 11px;font-size:11.5px;color:var(--high-tx)"><b>' + m(d.totals.overpayment) + '</b> paid above the CMS-allowed amount — recoverable per CMS reference pricing.</div>' : '') +
-      '<div class="card"><div style="font-weight:500;font-size:12.5px;margin-bottom:6px">Pricing rules applied</div>' + d.rulesApplied.map(function (r) { return '<div style="display:flex;gap:7px;font-size:11.5px;color:var(--text2);padding:2px 0"><i class="ti ti-check" style="color:var(--accent-d)"></i>' + window.APP.esc(r) + '</div>'; }).join("") + '</div>' +
+      (d.totals.overpayment > 0 ? '<div style="background:var(--high-bg);border:0.5px solid #f3c9c9;border-radius:7px;padding:9px 11px;font-size:11.5px;color:var(--high-tx)"><b>' + m(d.totals.overpayment) + '</b> exposure above the CMS-allowed amount — recoverable per CMS reference pricing.</div>' : '') +
+      (a.mode === "prepay" ? '<div style="background:var(--surface);border:0.5px solid var(--border);border-radius:7px;padding:9px 11px;font-size:11.5px;color:var(--text2)"><i class="ti ti-info-circle"></i> This claim is <b>pre-payment</b> — exposure is $0 per line because nothing has been paid yet. Compare the submitted charge against the CMS-allowed amount to price it before releasing payment.</div>' : '') +
+      pricingVersionsHtml(d.ruleVersions) +
+      '</div>';
+  }
+  // Pricing rules with version history — each rule shows the version in force plus
+  // its prior versions (effective date + value + what changed), expandable.
+  function pricingVersionsHtml(vers) {
+    if (!vers || !vers.length) return "";
+    var rows = vers.map(function (r, i) {
+      var hist = (r.history || []).map(function (h) {
+        return '<div style="display:flex;gap:8px;align-items:baseline;padding:5px 0 5px 22px;border-top:0.5px solid var(--border2)">' +
+          '<span class="mono" style="font-size:10.5px;color:var(--text3);white-space:nowrap;min-width:56px">' + window.APP.esc(h.version) + '</span>' +
+          '<span class="mono" style="font-size:10.5px;color:var(--text3);white-space:nowrap">' + window.APP.esc(h.effective) + '</span>' +
+          '<span style="font-size:11px;flex:1"><span style="color:var(--text)">' + window.APP.esc(h.value) + '</span>' + (h.change ? ' <span style="color:var(--text2)">· ' + window.APP.esc(h.change) + '</span>' : '') + '</span></div>';
+      }).join("");
+      return '<div style="border-top:0.5px solid var(--border2)">' +
+        '<div class="pv-rule" data-i="' + i + '" style="display:flex;gap:9px;align-items:center;padding:8px 0;cursor:pointer">' +
+        '<i class="ti ti-chevron-right pv-rule-caret" style="color:var(--text3);font-size:14px;transition:transform .12s"></i>' +
+        '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:500">' + window.APP.esc(r.name) + ' <span class="muted" style="font-weight:400;font-size:10.5px">· ' + window.APP.esc(r.authority) + '</span></div>' +
+        '<div style="font-size:10.5px;color:var(--text2)">' + window.APP.esc(r.note) + '</div></div>' +
+        '<div style="text-align:right;white-space:nowrap"><div class="mono" style="font-size:11px;font-weight:500">' + window.APP.esc(r.current.version) + '</div>' +
+        '<div style="font-size:11px;color:var(--text)">' + window.APP.esc(r.current.value) + '</div>' +
+        '<div class="mono" style="font-size:10px;color:var(--text3)">eff. ' + window.APP.esc(r.current.effective) + '</div></div></div>' +
+        '<div class="pv-hist" data-i="' + i + '" style="display:none;padding-bottom:6px">' +
+        '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;padding:2px 0 3px 22px">Prior versions</div>' + (hist || '<div style="font-size:11px;color:var(--text3);padding-left:22px">No prior versions on file.</div>') + '</div>';
+    }).join("");
+    return '<div class="card"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:2px">' +
+      '<div style="font-weight:500;font-size:12.5px"><i class="ti ti-history" style="color:var(--accent-d)"></i> Pricing rules &amp; version history <span class="muted" style="font-weight:400;font-size:11px">· the version in force priced this claim; click a rule for prior versions</span></div></div>' +
+      rows + '</div>';
+  }
+  function wirePricingVersions(root) {
+    (root || document).querySelectorAll(".pv-rule").forEach(function (row) {
+      row.addEventListener("click", function () {
+        var i = row.getAttribute("data-i");
+        var hist = (root || document).querySelector('.pv-hist[data-i="' + i + '"]'); if (!hist) return;
+        var open = hist.style.display !== "none";
+        hist.style.display = open ? "none" : "block";
+        var c = row.querySelector(".pv-rule-caret"); if (c) c.style.transform = open ? "" : "rotate(90deg)";
+      });
+    });
+  }
+
+  // ---------- CPT crosswalk (Coding) ----------
+  // "This procedure code billed with this modifier" — per-line NCCI PTP, MUE and
+  // modifier-validity checks, so the reviewer can see WHY a pairing is improper.
+  function xwalkHtml(a, cl) {
+    if (!cl) return noClaimCard("the CPT crosswalk");
+    var d = window.DP.getCptCrosswalk(cl.id); if (!d) return noClaimCard("the CPT crosswalk");
+    var V = {
+      pass: ["circle-check", "var(--low-tx)", "var(--low-bg)", "Passes"],
+      review: ["alert-triangle", "var(--med-tx)", "var(--med-bg)", "Review"],
+      fail: ["circle-x", "var(--high-tx)", "var(--high-bg)", "Fails"]
+    };
+    var rows = d.lines.map(function (l) {
+      var v = V[l.verdict];
+      var codeChip = '<span class="mono" style="font-size:12px;font-weight:600">' + l.cpt + '</span>' +
+        (l.modifiers.length ? l.modifiers.map(function (m) {
+          var chk = l.modChecks.find(function (c) { return c.mod === m; }) || {};
+          var bad = chk.valid === false;
+          return ' <span class="mono" style="font-size:11px;padding:1px 5px;border-radius:4px;background:' + (bad ? "var(--high-bg)" : "var(--surface)") + ';color:' + (bad ? "var(--high-tx)" : "var(--text2)") + ';border:0.5px solid ' + (bad ? "#f3c9c9" : "var(--border)") + '">-' + m + '</span>';
+        }).join("") : ' <span class="muted" style="font-size:10.5px">no modifier</span>');
+
+      var detail = [];
+      if (l.ptp) {
+        var pv = V[l.ptp.status];
+        detail.push('<div style="display:flex;gap:7px;align-items:flex-start"><i class="ti ti-' + pv[0] + '" style="color:' + pv[1] + ';margin-top:1px;font-size:13px"></i><div>' +
+          '<span style="font-weight:500">NCCI PTP edit</span> <span class="mono" style="font-size:10.5px;color:var(--text2)">' + l.ptp.column1 + ' → ' + l.ptp.column2 + ' · indicator ' + l.ptp.indicator + '</span>' +
+          '<div style="color:var(--text2)">' + window.APP.esc(l.ptp.note) + '</div></div></div>');
+      }
+      if (l.mue) {
+        var mv = l.mue.exceeded ? V.fail : V.pass;
+        detail.push('<div style="display:flex;gap:7px;align-items:flex-start"><i class="ti ti-' + mv[0] + '" style="color:' + mv[1] + ';margin-top:1px;font-size:13px"></i><div>' +
+          '<span style="font-weight:500">MUE</span> <span class="mono" style="font-size:10.5px;color:var(--text2)">' + l.mue.billed + ' of ' + l.mue.limit + ' units/day</span>' +
+          '<div style="color:var(--text2)">' + window.APP.esc(l.mue.note || "Units billed are within the medically-unlikely-edit limit.") + '</div></div></div>');
+      }
+      l.modChecks.forEach(function (c) {
+        var cv = c.valid ? V.pass : V.fail;
+        detail.push('<div style="display:flex;gap:7px;align-items:flex-start"><i class="ti ti-' + cv[0] + '" style="color:' + cv[1] + ';margin-top:1px;font-size:13px"></i><div>' +
+          '<span style="font-weight:500">Modifier ' + c.mod + '</span> <span style="color:var(--text2)">— ' + window.APP.esc(c.name) + '</span>' +
+          '<div style="color:var(--text2)">' + window.APP.esc(c.note) + '</div></div></div>');
+      });
+      if (!detail.length) detail.push('<div style="color:var(--text2)"><i class="ti ti-circle-check" style="color:var(--low-tx)"></i> No coding edits apply to this line.</div>');
+
+      return '<div style="border-top:0.5px solid var(--border2);padding:10px 0">' +
+        '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+        '<div style="flex:1;min-width:0">' + codeChip + ' <span style="font-size:12px;color:var(--text2)">' + window.APP.esc(l.description) + '</span></div>' +
+        '<span class="tag" style="background:' + v[2] + ';color:' + v[1] + '"><i class="ti ti-' + v[0] + '"></i> ' + v[3] + '</span></div>' +
+        '<div style="font-size:11.5px;line-height:1.6;margin-top:6px;display:flex;flex-direction:column;gap:5px;padding-left:2px">' + detail.join("") + '</div>' +
+        '</div>';
+    }).join("");
+
+    var tone = d.fails ? V.fail : d.reviews ? V.review : V.pass;
+    return '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">' +
+      '<div style="font-weight:500;font-size:13px"><i class="ti ti-arrows-left-right" style="color:var(--accent-d)"></i> CPT crosswalk <span class="muted" style="font-weight:400;font-size:11px">· is this code payable billed with this modifier?</span></div>' +
+      '<span class="tag" style="background:var(--surface)"><i class="ti ti-plug-connected"></i> ' + window.APP.esc(d.source) + '</span></div>' +
+      '<div style="font-size:11px;color:var(--text2);margin-top:4px">' + window.APP.esc(d.asOf) + '</div></div>' +
+      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">' +
+      stat("Lines failing", '<span style="color:' + (d.fails ? "var(--high-tx)" : "var(--text)") + '">' + d.fails + '</span>') +
+      stat("Needing review", '<span style="color:' + (d.reviews ? "var(--med-tx)" : "var(--text)") + '">' + d.reviews + '</span>') +
+      stat("Clean", d.clean) + '</div>' +
+      '<div style="background:' + tone[2] + ';border:0.5px solid ' + (d.fails ? "#f3c9c9" : d.reviews ? "#e7c99a" : "#bfe0cd") + ';border-radius:7px;padding:9px 11px;font-size:11.5px;color:' + tone[1] + '">' +
+      '<i class="ti ti-' + tone[0] + '"></i> <b>' + window.APP.esc(d.determination) + '</b></div>' +
+      '<div class="card" style="padding:2px 12px 10px"><div style="font-weight:500;font-size:13px;padding:9px 0 2px">Line-by-line</div>' + rows + '</div>' +
+      '<div class="card"><div style="font-weight:500;font-size:12.5px;margin-bottom:6px">Edits applied</div>' +
+      d.editsApplied.map(function (r) { return '<div style="display:flex;gap:7px;font-size:11.5px;color:var(--text2);padding:2px 0"><i class="ti ti-check" style="color:var(--accent-d)"></i>' + window.APP.esc(r) + '</div>'; }).join("") + '</div>' +
       '</div>';
   }
 
   // ---------- Utilization management (Milliman MCG) ----------
   function umKv(k, v) { return '<div class="card" style="padding:7px 9px;box-shadow:none;background:var(--surface)"><div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.03em">' + k + '</div><div style="font-size:12px;font-weight:500;margin-top:2px">' + window.APP.esc(v) + '</div></div>'; }
   function losRow(label, val, rec, act, color) { var max = Math.max(rec, act, 1); var w = Math.round(val / max * 100); return '<div style="margin-bottom:6px"><div style="display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:2px"><span>' + label + '</span><span style="font-weight:600">' + val + ' days</span></div><div style="height:9px;background:var(--border2);border-radius:5px;overflow:hidden"><div style="height:100%;width:' + w + '%;background:' + color + '"></div></div></div>'; }
+  // Facility capacity: patient-days billed vs what the staffed beds can physically
+  // hold. Over-capacity = impossible days no coding review would catch.
+  function capacityCard(a) {
+    var c = window.DP.getFacilityCapacity(a.providerId); if (!c) return "";
+    var over = c.overCapacity;
+    var barMax = Math.max(c.capacityDays, c.patientDaysBilled, 1);
+    var bar = function (label, val, color, sub) {
+      var w = Math.round(val / barMax * 100);
+      return '<div style="margin-bottom:7px"><div style="display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:2px"><span>' + label + '</span><span style="font-weight:600">' + val.toLocaleString() + ' <span style="font-weight:400;color:var(--text2);font-size:10.5px">' + sub + '</span></span></div><div style="height:9px;background:var(--border2);border-radius:5px;overflow:hidden"><div style="height:100%;width:' + Math.min(100, w) + '%;background:' + color + '"></div></div></div>';
+    };
+    var st = { bg: over ? "var(--high-bg)" : "var(--low-bg)", bd: over ? "#f3c9c9" : "#bfe0c9", tx: over ? "var(--high-tx)" : "var(--low-tx)" };
+    return '<div class="card">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">' +
+      '<div style="font-weight:500;font-size:12.5px"><i class="ti ti-bed" style="color:var(--accent-d)"></i> Facility capacity <span class="muted" style="font-weight:400;font-size:11px">· beds vs patient-days billed · ' + c.periodLabel + '</span></div>' +
+      '<span class="tag" style="background:' + st.bg + ';color:' + st.tx + '"><i class="ti ti-' + (over ? "alert-triangle" : "circle-check") + '"></i> ' + c.utilization + '% of capacity</span></div>' +
+      '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:9px;font-size:11.5px">' +
+      umKv("Licensed beds", c.licensedBeds) + umKv("Staffed beds", c.staffedBeds) + '</div>' +
+      bar("Physical capacity (staffed beds × " + c.periodDays + " days)", c.capacityDays, "#6b7a8d", "patient-days") +
+      bar("Patient-days billed", c.patientDaysBilled, over ? "var(--high)" : "var(--accent)", "patient-days") +
+      '<div style="background:' + st.bg + ';border:0.5px solid ' + st.bd + ';border-radius:7px;padding:9px 11px;margin-top:4px;font-size:11.5px;color:' + st.tx + '">' +
+      (over
+        ? '<i class="ti ti-alert-triangle"></i> Billed <b>' + c.excessDays.toLocaleString() + ' more patient-days</b> than the staffed beds can physically hold — impossible days. Peak census <b>' + c.peakConcurrent + '</b> vs <b>' + c.staffedBeds + '</b> staffed beds (' + c.peakExcess + ' over). Independent of coding review.'
+        : '<i class="ti ti-circle-check"></i> Patient-days billed are within physical bed capacity; peak census ' + c.peakConcurrent + ' vs ' + c.staffedBeds + ' staffed beds.') +
+      '</div></div>';
+  }
   function umHtml(a, cl) {
     if (!cl) return noClaimCard("utilization management");
     var d = window.DP.getUtilizationMgmt(cl.id); if (!d) return noClaimCard("utilization management");
@@ -427,6 +608,7 @@
     var critRows = d.criteria.map(function (c) { return '<div style="display:flex;gap:9px;align-items:flex-start;padding:6px 0;border-top:0.5px solid var(--border2)"><i class="ti ti-' + (c.met ? "circle-check" : "circle-x") + '" style="color:' + (c.met ? "var(--low)" : "var(--high)") + ';font-size:16px;margin-top:1px"></i><div><div style="font-size:12px' + (c.met ? "" : ";font-weight:500") + '">' + window.APP.esc(c.label) + '</div>' + (c.note ? '<div style="font-size:11px;color:var(--text2)">' + window.APP.esc(c.note) + '</div>' : '') + '</div></div>'; }).join("");
     var losBar = los ? ('<div class="card"><div style="font-weight:500;font-size:12.5px;margin-bottom:7px">Length of stay</div>' + losRow("MCG recommended", los.recommendedDays, los.recommendedDays, los.actualDays, "#98a4b3") + losRow("Actual (billed)", los.actualDays, los.recommendedDays, los.actualDays, los.actualDays > los.recommendedDays ? "var(--high)" : "var(--accent)") + '<div style="font-size:11px;color:var(--text2);margin-top:4px">' + (los.actualDays > los.recommendedDays ? ('<b style="color:var(--high-tx)">' + (los.actualDays - los.recommendedDays) + ' days</b> beyond the MCG-recommended ' + los.recommendedDays + '-day stay.') : 'Within the recommended range.') + '</div></div>') : '';
     return '<div style="display:flex;flex-direction:column;gap:10px">' +
+      capacityCard(a) +
       '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div style="font-weight:500;font-size:13px"><i class="ti ti-clipboard-heart" style="color:var(--accent-d)"></i> Utilization management <span class="muted" style="font-weight:400;font-size:11px">· clinical criteria &amp; medical necessity</span></div>' +
       '<span class="tag" style="background:var(--surface)"><i class="ti ti-plug-connected"></i> ' + window.APP.esc(d.source) + ' · ' + d.edition + '</span></div>' +
       '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px">' + umKv("Guideline", d.guideline.code + " — " + d.guideline.title) + umKv("Recommended level of care", d.levelOfCare.recommended) + umKv("Billed level of care", d.levelOfCare.billed) + umKv("Prior authorization", d.priorAuth.required ? ((d.priorAuth.number || "—") + " · " + d.priorAuth.status) : d.priorAuth.status) + '</div></div>' +
@@ -436,15 +618,39 @@
       '</div>';
   }
   function fmtSize(b) { return b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : b >= 1024 ? Math.round(b / 1024) + " KB" : b + " B"; }
+  // Uploaded files and generated artifacts share this list. An artifact carries its
+  // body, so it expands in place; an upload is a name only.
   function uploadsListHtml(id) {
     var ups = window.APP.getUploads(id);
-    if (!ups.length) return '<div class="muted" style="font-size:11.5px;padding:4px 0">No documents attached yet. Use “Attach document” to add supporting records — every upload is logged to the audit trail.</div>';
-    return ups.map(function (u) {
+    var arts = window.APP.getArtifacts(id);
+    if (!ups.length && !arts.length) return '<div class="muted" style="font-size:11.5px;padding:4px 0">No documents attached yet. Use “Attach document” to add supporting records, or generate an AI justification on the Decision tab — every attachment is logged to the audit trail.</div>';
+    var artRows = arts.map(function (u, i) {
+      return '<div style="border-top:0.5px solid var(--border2)">' +
+        '<div class="art-row" data-art="' + i + '" style="display:flex;align-items:center;gap:9px;padding:7px 0;cursor:pointer"><i class="ti ti-file-text" style="color:var(--accent-d);font-size:17px"></i>' +
+        '<div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:500">' + window.APP.esc(u.name) + '</div>' +
+        '<div class="muted" style="font-size:10.5px">' + window.APP.esc(u.by || "") + " · " + window.APP.fmtTs(u.ts) + '</div></div>' +
+        '<span class="tag" style="background:var(--accent-l);color:var(--accent-d)"><i class="ti ti-sparkles"></i> AI-drafted</span>' +
+        '<i class="ti ti-chevron-down art-caret" style="color:var(--text3);font-size:14px"></i></div>' +
+        '<pre class="mono art-body" data-art="' + i + '" style="display:none;margin:0 0 8px;padding:9px 11px;background:var(--surface);border:0.5px solid var(--border);border-radius:6px;font-size:10.5px;line-height:1.55;max-height:240px;overflow:auto;white-space:pre-wrap">' + window.APP.esc(u.body || "") + '</pre></div>';
+    }).join("");
+    var upRows = ups.map(function (u) {
       return '<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-top:0.5px solid var(--border2)"><i class="ti ti-file-description" style="color:var(--accent-d);font-size:17px"></i>' +
         '<div style="flex:1;min-width:0"><div style="font-size:12.5px;font-weight:500">' + window.APP.esc(u.name) + '</div>' +
         '<div class="muted" style="font-size:10.5px">' + (u.size ? fmtSize(u.size) + " · " : "") + window.APP.esc(u.by || "") + " · " + window.APP.fmtTs(u.ts) + '</div></div>' +
         '<span class="tag" style="background:var(--low-bg);color:var(--low-tx)">attached</span></div>';
     }).join("");
+    return artRows + upRows;
+  }
+  function wireArtifacts(root) {
+    (root || document).querySelectorAll(".art-row").forEach(function (row) {
+      row.addEventListener("click", function () {
+        var i = row.getAttribute("data-art");
+        var body = (root || document).querySelector('.art-body[data-art="' + i + '"]'); if (!body) return;
+        var open = body.style.display !== "none";
+        body.style.display = open ? "none" : "block";
+        var c = row.querySelector(".art-caret"); if (c) c.style.transform = open ? "" : "rotate(180deg)";
+      });
+    });
   }
   function wireEvidenceDocs(id, a, cl) {
     var rows = document.querySelectorAll(".ev-doc-row");
@@ -482,7 +688,9 @@
     input.addEventListener("change", function () {
       var f = input.files && input.files[0]; if (!f) return;
       window.APP.addUpload(id, f.name, f.size); input.value = "";
-      document.getElementById("c-uploads-list").innerHTML = uploadsListHtml(id);
+      var list = document.getElementById("c-uploads-list");
+      list.innerHTML = uploadsListHtml(id);
+      wireArtifacts(list);
     });
   }
   function defaultRecordsRequest(a) {
@@ -495,6 +703,112 @@
       "Kickback / self-referral": "Referral agreements, financial arrangements and ownership disclosures between the linked entities."
     };
     return m[a.fwaType] || "Itemized medical records and documentation supporting the billed services.";
+  }
+
+  // ---------- medical-records request (channel + status lifecycle) ----------
+  // Left-rail panel. Three states: no request → the compose form; sent/awaiting →
+  // the tracking card with the response clock; received → the closed-out receipt.
+  function recordsPanelHtml(id, a) {
+    var r = window.APP.recordsRequestFor(id);
+    if (!r) {
+      return '<button class="btn" id="c-req" style="width:100%;font-size:11px"><i class="ti ti-plus"></i> Request additional records</button>' +
+        '<div id="c-req-form"></div>';
+    }
+    return recordsTrackHtml(id, r);
+  }
+  function recordsComposeHtml(id, a) {
+    var contact = window.DP.getProviderContact(a.providerId) || {};
+    var def = (window.APP.state.recordsRequestText || {})[id] || defaultRecordsRequest(a);
+    var chans = window.APP.RECORDS_CHANNELS.map(function (ch, i) {
+      return '<label class="c-rq-ch" style="display:flex;gap:7px;align-items:flex-start;padding:6px 7px;border:0.5px solid ' + (i === 0 ? "var(--accent)" : "var(--border)") + ';border-radius:6px;margin-bottom:4px;cursor:pointer;background:' + (i === 0 ? "var(--accent-l)" : "#fff") + '">' +
+        '<input type="radio" name="c-rq-ch" value="' + ch.c + '"' + (i === 0 ? " checked" : "") + ' style="margin-top:1px">' +
+        '<div style="min-width:0"><div style="font-size:11.5px;font-weight:500"><i class="ti ti-' + ch.icon + '" style="color:var(--accent-d)"></i> ' + ch.l + '</div>' +
+        '<div style="font-size:10px;color:var(--text2)">' + ch.sub + '</div></div></label>';
+    }).join("");
+    return '<div style="background:var(--surface);border:0.5px solid var(--border);border-radius:7px;padding:8px 9px;margin-top:6px">' +
+      '<div style="font-size:10.5px;color:var(--text2);margin-bottom:4px">Channel</div>' + chans +
+      '<div id="c-rq-to" style="font-size:10px;color:var(--text2);margin:2px 0 6px"></div>' +
+      '<div style="font-size:10.5px;color:var(--text2);margin-bottom:4px">Records to request <span style="color:var(--text3)">(editable)</span></div>' +
+      '<textarea id="c-req-text" class="input" style="min-height:52px;font-size:11.5px">' + window.APP.esc(def) + '</textarea>' +
+      '<div style="display:flex;gap:6px;margin-top:6px"><button class="btn" id="c-req-cancel" style="flex:none;font-size:11px">Cancel</button>' +
+      '<button class="btn primary" id="c-req-send" style="flex:1;font-size:11px"><i class="ti ti-send"></i> Send request</button></div></div>';
+  }
+  function recordsStepper(status) {
+    var cur = window.APP.RECORDS_STEPS.findIndex(function (s) { return s.c === status; });
+    return '<div style="display:flex;align-items:center;margin:2px 0 8px">' + window.APP.RECORDS_STEPS.map(function (s, i) {
+      var done = i < cur, at = i === cur;
+      var bg = done ? "var(--accent)" : at ? "#fff" : "var(--border2)";
+      var bd = done || at ? "var(--accent)" : "var(--border)";
+      var dot = '<div style="width:12px;height:12px;border-radius:50%;flex:none;background:' + bg + ';border:1.5px solid ' + bd + ';display:flex;align-items:center;justify-content:center">' + (done ? '<i class="ti ti-check" style="color:#fff;font-size:8px"></i>' : at ? '<span style="width:4px;height:4px;border-radius:50%;background:var(--accent);display:block"></span>' : '') + '</div>';
+      var line = i < window.APP.RECORDS_STEPS.length - 1 ? '<div style="flex:1;height:1.5px;background:' + (done ? "var(--accent)" : "var(--border2)") + '"></div>' : '';
+      return dot + line;
+    }).join("") + '</div>' +
+      '<div style="display:flex;justify-content:space-between;font-size:8.5px;color:var(--text3);margin-bottom:8px">' +
+      window.APP.RECORDS_STEPS.map(function (s) { return '<span>' + s.l.split(" ")[0] + '</span>'; }).join("") + '</div>';
+  }
+  function recordsTrackHtml(id, r) {
+    var ch = window.APP.recordsChannel(r.channel);
+    var received = r.status === "received";
+    var daysLeft = window.APP.recordsDaysLeft(r);
+    var overdue = daysLeft != null && daysLeft < 0;
+    var clock = received
+      ? '<div style="font-size:10.5px;color:var(--low-tx)"><i class="ti ti-circle-check"></i> Received ' + window.APP.fmtDate(r.receivedAt) + ' · “' + window.APP.esc(r.receivedFile.name) + '” filed to evidence</div>'
+      : '<div style="font-size:10.5px;color:' + (overdue ? "var(--high-tx)" : "var(--text2)") + '"><i class="ti ti-clock"></i> Response due ' + window.APP.fmtDate(r.dueAt) + (daysLeft != null ? ' · ' + (overdue ? Math.abs(daysLeft) + "d overdue" : daysLeft + "d left") : "") + '</div>';
+    var actions = received ? ''
+      : '<div style="display:flex;gap:5px;margin-top:7px">' +
+        (r.channel === "portal"
+          ? '<button class="btn primary" id="c-req-portal" style="flex:1;font-size:11px"><i class="ti ti-external-link"></i> Open provider portal</button>'
+          : '<button class="btn primary" id="c-req-receive" style="flex:1;font-size:11px"><i class="ti ti-mail-check"></i> Log records received</button>') +
+        '<button class="btn" id="c-req-cancel2" style="flex:none;font-size:11px" title="Withdraw request"><i class="ti ti-x"></i></button></div>';
+    return '<div style="background:var(--surface);border:0.5px solid ' + (received ? "#bfe0c9" : overdue ? "#f3c9c9" : "var(--border)") + ';border-radius:7px;padding:9px 10px">' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><i class="ti ti-' + ch.icon + '" style="color:var(--accent-d)"></i>' +
+      '<span style="font-size:11.5px;font-weight:500">Records request</span>' +
+      '<span class="tag" style="margin-left:auto;background:' + (received ? "var(--low-bg)" : "var(--med-bg)") + ';color:' + (received ? "var(--low-tx)" : "var(--med-tx)") + '">' + (received ? "Received" : r.status === "sent" ? "Sent" : "Awaiting") + '</span></div>' +
+      recordsStepper(r.status) +
+      '<div style="font-size:10.5px;color:var(--text2);line-height:1.55">' + ch.l + ' → <span class="mono">' + window.APP.esc(r.recipient) + '</span><br>' +
+      'Conf. <span class="mono">' + window.APP.esc(r.confirmation) + '</span>' + (r.pages ? ' · ' + r.pages + ' pp' : '') + ' · sent ' + window.APP.fmtDate(r.sentAt) + '</div>' +
+      '<div style="font-size:10.5px;color:var(--text2);margin-top:4px">' + window.APP.esc(r.items || "Supporting documentation") + '</div>' +
+      '<div style="margin-top:6px">' + clock + '</div>' + actions + '</div>';
+  }
+  function wireRecords(id, a) {
+    var openBtn = document.getElementById("c-req");
+    if (openBtn) openBtn.addEventListener("click", function () {
+      document.getElementById("c-req-form").innerHTML = recordsComposeHtml(id, a);
+      openBtn.style.display = "none";
+      wireRecordsCompose(id, a);
+    });
+    wireRecordsTrack(id, a);
+  }
+  function wireRecordsCompose(id, a) {
+    var contact = window.DP.getProviderContact(a.providerId) || {};
+    var toLine = function () {
+      var ch = (document.querySelector('input[name="c-rq-ch"]:checked') || {}).value || "fax";
+      var to = ch === "fax" ? contact.fax : ch === "email" ? contact.email : contact.portal;
+      document.getElementById("c-rq-to").innerHTML = '<i class="ti ti-arrow-narrow-right"></i> ' + window.APP.esc(to) + ' · Attn: ' + window.APP.esc(contact.attention || "HIM");
+    };
+    document.querySelectorAll('.c-rq-ch').forEach(function (lab) {
+      lab.querySelector("input").addEventListener("change", function () {
+        document.querySelectorAll('.c-rq-ch').forEach(function (l) { var on = l.querySelector("input").checked; l.style.borderColor = on ? "var(--accent)" : "var(--border)"; l.style.background = on ? "var(--accent-l)" : "#fff"; });
+        toLine();
+      });
+    });
+    toLine();
+    document.getElementById("c-req-cancel").addEventListener("click", function () { rerender(id); });
+    document.getElementById("c-req-send").addEventListener("click", function () {
+      var ch = (document.querySelector('input[name="c-rq-ch"]:checked') || {}).value || "fax";
+      var txt = document.getElementById("c-req-text").value.trim();
+      (window.APP.state.recordsRequestText = window.APP.state.recordsRequestText || {})[id] = txt || defaultRecordsRequest(a);
+      window.APP.requestRecords(id, { channel: ch, items: txt || defaultRecordsRequest(a) });
+      rerender(id);
+    });
+  }
+  function wireRecordsTrack(id, a) {
+    var recv = document.getElementById("c-req-receive");
+    if (recv) recv.addEventListener("click", function () { window.APP.receiveRecords(id, { name: "provider-records_Lead-" + id + ".pdf", size: 348000, via: (window.APP.recordsRequestFor(id) || {}).channel }); rerender(id); });
+    var portal = document.getElementById("c-req-portal");
+    if (portal) portal.addEventListener("click", function () { window.APP.openPortal(id); });
+    var cancel = document.getElementById("c-req-cancel2");
+    if (cancel) cancel.addEventListener("click", function () { window.APP.cancelRecordsRequest(id); rerender(id); });
   }
 
   // ---------- Analysis (decision-supporting graphs) ----------
@@ -510,11 +824,11 @@
     var max = Math.max(billed, allowed, paid, prepay ? allowed : 0, 1);
     var bar = function (label, val, color) { var w = Math.round(val / max * 100); return '<div style="margin-bottom:7px"><div style="display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:2px"><span>' + label + '</span><span style="font-weight:600">' + window.DP.usd(val) + '</span></div><div style="height:9px;background:var(--border2);border-radius:5px;overflow:hidden"><div style="height:100%;width:' + w + '%;background:' + color + '"></div></div></div>'; };
     var bars = bar("Billed (this claim)", billed, "#98a4b3") + bar("Allowed", allowed, "#6b7a8d") +
-      (prepay ? bar("At risk (pending)", allowed, "var(--high)") : bar("Paid", paid, "var(--ink)"));
+      (prepay ? bar("Exposure — at risk (pre-pay)", allowed, "var(--high)") : bar("Exposure — paid (post-pay)", paid, "var(--ink)"));
     var callout = prepay
       ? '<div style="background:var(--high-bg);border:0.5px solid #f3c9c9;border-radius:7px;padding:8px 10px;margin-top:6px;font-size:11.5px;color:var(--high-tx)"><b>' + window.DP.usd(a.exposurePre || allowed) + '</b> at risk — nothing is paid yet. Denying or holding this claim keeps that money from leaving.</div>'
       : '<div style="background:var(--high-bg);border:0.5px solid #f3c9c9;border-radius:7px;padding:8px 10px;margin-top:6px;font-size:11.5px;color:var(--high-tx)"><b>' + window.DP.usd(a.exposurePost || 0) + '</b> estimated improper across this provider’s flagged pattern (not just this one claim) — recoverable if confirmed.</div>';
-    return card("Exposure breakdown", bars + callout);
+    return card("Exposure breakdown <span class=\"muted\" style=\"font-weight:400;font-size:11px\">· exposure type: " + exposureType(a) + "</span>", bars + callout);
   }
   function emMix(p) {
     var share = p.em99215ShareComputed; if (share == null) return "";
@@ -574,20 +888,103 @@
   function lgDot(color, label) { return '<span class="lg"><span class="dot" style="border-color:' + color + ';background:' + color + '26"></span>' + label + '</span>'; }
   function lgLine(color, w, label) { return '<span class="lg"><span style="width:16px;height:0;border-top:' + w + 'px solid ' + color + '"></span>' + label + '</span>'; }
 
+  // ---------- History ----------
+  // Every action on this lead, newest first — the "who did what, when" record an
+  // investigator needs when a case is handed over or challenged on appeal.
+  var HIST_ICON = {
+    LEAD_CREATED: ["flag", "var(--text2)"], CASE_ASSIGNED: ["user-plus", "var(--accent-d)"],
+    DECISION_CONFIRM: ["gavel", "var(--high)"], DECISION_DISMISS: ["circle-x", "var(--text2)"], DECISION_ESCALATE: ["arrow-up-right", "var(--med)"],
+    PREPAY_PAY: ["check", "var(--low)"], PREPAY_HOLD: ["clock-hour-4", "var(--med)"], PREPAY_DENY: ["ban", "var(--high)"],
+    SUBMITTED_FOR_REVIEW: ["send", "var(--accent-d)"], SUPERVISOR_APPROVED: ["circle-check", "var(--low)"], SUPERVISOR_RETURNED: ["corner-up-left", "var(--med)"],
+    RECORDS_REQUESTED: ["mail-forward", "var(--accent-d)"], RECORDS_SENT: ["send", "var(--accent-d)"], RECORDS_AWAITING: ["clock-hour-4", "var(--med)"], RECORDS_RECEIVED: ["mail-check", "var(--low)"], RECORDS_REQUEST_CANCELLED: ["x", "var(--text2)"],
+    MEDICAL_RECORD_VIEWED: ["eye", "var(--text3)"], EVIDENCE_VIEWED: ["eye", "var(--text3)"], PRECEDENT_VIEWED: ["history", "var(--text3)"], NETWORK_VIEWED: ["share-3", "var(--text3)"],
+    DOCUMENT_UPLOADED: ["paperclip", "var(--accent-d)"], NOTE_ADDED: ["message", "var(--accent-d)"],
+    AI_JUSTIFICATION_DRAFTED: ["sparkles", "var(--accent-d)"], AI_JUSTIFICATION_ATTACHED: ["file-text", "var(--accent-d)"],
+    RECORD_EDITED: ["edit", "var(--med)"], RECORD_REVERTED: ["arrow-back-up", "var(--text2)"],
+    CASE_OPENED: ["folder-plus", "var(--med)"], CASE_UPDATED: ["folder", "var(--accent-d)"], CASE_LINK: ["link", "var(--accent-d)"],
+    RECOVERY_SUBMITTED: ["currency-dollar", "var(--high)"], CASE_CLOSED: ["archive", "var(--text2)"]
+  };
+  function histLabel(action) {
+    return String(action || "").toLowerCase().replace(/_/g, " ")
+      .replace(/^./, function (c) { return c.toUpperCase(); })
+      // sentence-casing would otherwise render these acronyms as "Ai", "Cms", "Cpt"
+      .replace(/\bai\b/gi, "AI").replace(/\bcms\b/gi, "CMS").replace(/\bcpt\b/gi, "CPT");
+  }
+  function historyHtml(id) {
+    var rows = window.APP.historyFor(id);
+    var counts = {};
+    rows.forEach(function (r) { var k = r.action === "NOTE_ADDED" ? "notes" : /VIEWED/.test(r.action) ? "views" : "actions"; counts[k] = (counts[k] || 0) + 1; });
+    var feed = rows.map(function (r) {
+      var ic = HIST_ICON[r.action] || ["point", "var(--text3)"];
+      var initials = String(r.user || "?").split(" ").map(function (w) { return w[0]; }).join("").slice(0, 2).toUpperCase();
+      return '<div style="display:flex;gap:10px;padding:9px 0;border-top:0.5px solid var(--border2)">' +
+        '<div style="width:24px;height:24px;flex:none;border-radius:50%;background:var(--surface);border:0.5px solid var(--border);display:flex;align-items:center;justify-content:center"><i class="ti ti-' + ic[0] + '" style="color:' + ic[1] + ';font-size:13px"></i></div>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:11px;color:var(--text2)"><span style="font-weight:600;color:var(--ink)">' + histLabel(r.action) + '</span>' +
+        (r.kind === "note" ? ' <span class="tag" style="background:var(--accent-l);color:var(--accent-d)">note</span>' : '') + '</div>' +
+        '<div style="font-size:12.5px;color:var(--text);margin-top:2px;line-height:1.5">' + window.APP.esc(r.text) + '</div>' +
+        '<div style="font-size:10.5px;color:var(--text3);margin-top:3px">' + window.APP.esc(r.user || "—") + (r.role ? " · " + window.APP.esc(r.role) : "") + ' · ' + window.APP.fmtTs(r.ts) + '</div>' +
+        '</div><div class="avatar" style="width:22px;height:22px;flex:none;font-size:9px">' + initials + '</div></div>';
+    }).join("");
+    return '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">' +
+      stat("Actions", (counts.actions || 0) + ' <span style="font-size:10px;font-weight:500;color:var(--text2)">on this lead</span>') +
+      stat("Notes", counts.notes || 0) +
+      stat("Record views", counts.views || 0) +
+      '</div>' +
+      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">' +
+      '<div style="font-weight:500;font-size:13px"><i class="ti ti-timeline-event" style="color:var(--accent-d)"></i> History <span class="muted" style="font-weight:400;font-size:11px">· every action on this lead, newest first — the full chain of custody</span></div>' +
+      '<span class="muted" style="font-size:11px">' + rows.length + ' event' + (rows.length === 1 ? '' : 's') + '</span></div>' +
+      (feed || '<div class="muted" style="font-size:12px;padding:8px 0">No activity recorded yet.</div>') + '</div></div>';
+  }
+
+  // ---------- Similar cases ----------
+  // Prior adjudicated cases of the same FWA type — the precedent an analyst leans on
+  // to decide. Its own tab (SME feedback: it was buried on the Decision tab).
+  function simRowHtml(s) {
+    var conf = s.outcome === "Confirmed";
+    return '<div class="prec-row" data-prec="' + s.id + '" style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:0.5px solid var(--border2);cursor:pointer">' +
+      '<span class="pill ' + (conf ? "p-conf" : "p-dis") + '">' + s.outcome + '</span>' +
+      '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:500">' + window.APP.esc(s.provider) + ' <span class="muted" style="font-weight:400">· ' + window.APP.esc(s.specialty) + '</span></div><div style="font-size:11px;color:var(--text2)">' + window.APP.esc(s.note) + '</div></div>' +
+      '<div style="text-align:right;white-space:nowrap"><div style="font-size:12px;font-weight:500">' + (conf ? window.DP.usd(s.recovered) + " recovered" : "—") + '</div><div class="mono" style="font-size:10px;color:var(--text3)">#' + s.id + ' · ' + s.adjudicatedDate + '</div></div></div>';
+  }
+  function similarHtml(a) {
+    var sims = window.DP.getSimilarAdjudicated(a.fwaType, 8);
+    var confirmed = sims.filter(function (s) { return s.outcome === "Confirmed"; });
+    var totalExp = sims.reduce(function (s, x) { return s + (x.exposure || 0); }, 0);
+    var totalRec = confirmed.reduce(function (s, x) { return s + (x.recovered || 0); }, 0);
+    var rate = sims.length ? Math.round(confirmed.length / sims.length * 100) : 0;
+    if (!sims.length) {
+      return '<div class="card" style="text-align:center;padding:28px"><i class="ti ti-history-off" style="font-size:26px;color:var(--text3)"></i>' +
+        '<div style="font-size:12.5px;color:var(--text2);margin-top:8px">No prior adjudicated cases of type “' + window.APP.esc(a.fwaType) + '”.</div>' +
+        '<div style="font-size:11px;color:var(--text3);margin-top:3px">This lead has no precedent to lean on — document your rationale carefully.</div></div>';
+    }
+    return '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">' +
+      stat("Prior cases", sims.length + ' <span style="font-size:10px;font-weight:500;color:var(--text2)">' + window.APP.esc(a.fwaType) + '</span>') +
+      stat("Confirmed", '<span style="color:' + (rate >= 60 ? "var(--high-tx)" : "var(--text)") + '">' + confirmed.length + '/' + sims.length + ' <span style="font-size:10px;font-weight:500">' + rate + '%</span></span>') +
+      stat("Exposure reviewed", window.DP.usd(totalExp)) +
+      stat("Recovered", window.DP.usd(totalRec)) +
+      '</div>' +
+      '<div class="card" style="background:var(--accent-l);border-color:#cfe7e3"><div style="font-size:12px;color:var(--accent-d);line-height:1.6"><i class="ti ti-scale"></i> <b>' + rate + '% of prior “' + window.APP.esc(a.fwaType) + '” cases were confirmed</b>' +
+      (rate >= 60 ? ' — precedent leans toward confirming. Check whether this lead’s documentation differs from the dismissed ones below.' : ' — precedent is mixed. Read the dismissed cases below before recovering.') + '</div></div>' +
+      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:500;font-size:13px"><i class="ti ti-history" style="color:var(--accent-d)"></i> Similar adjudicated cases</div><span class="muted" style="font-size:11px">click a case for the full adjudication</span></div>' +
+      sims.map(simRowHtml).join("") + '<div id="c-prec"></div></div>' +
+      '</div>';
+  }
+
   // ---------- Decision (mode-aware) ----------
   function decisionHtml(id, a, cl) {
-    var sims = window.DP.getSimilarAdjudicated(a.fwaType, 3);
-    var simConfirmed = sims.filter(function (s) { return s.outcome === "Confirmed"; }).length;
-    var simsHtml = sims.length ? sims.map(function (s) {
-      var conf = s.outcome === "Confirmed";
-      return '<div class="prec-row" data-prec="' + s.id + '" style="display:flex;gap:10px;align-items:center;padding:8px 0;border-top:0.5px solid var(--border2);cursor:pointer">' +
-        '<span class="pill ' + (conf ? "p-conf" : "p-dis") + '">' + s.outcome + '</span>' +
-        '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:500">' + window.APP.esc(s.provider) + ' <span class="muted" style="font-weight:400">· ' + window.APP.esc(s.specialty) + '</span></div><div style="font-size:11px;color:var(--text2)">' + window.APP.esc(s.note) + '</div></div>' +
-        '<div style="text-align:right;white-space:nowrap"><div style="font-size:12px;font-weight:500">' + (conf ? window.DP.usd(s.recovered) + " recovered" : "—") + '</div><div class="mono" style="font-size:10px;color:var(--text3)">#' + s.id + ' · ' + s.adjudicatedDate + '</div></div></div>';
-    }).join("") : '<div class="muted" style="font-size:11.5px;padding-top:6px">No prior adjudicated cases of this type.</div>';
+    var sims = window.DP.getSimilarAdjudicated(a.fwaType, 8);
+    var confirmed = sims.filter(function (s) { return s.outcome === "Confirmed"; }).length;
+    var simLink = sims.length
+      ? '<div class="card" style="display:flex;align-items:center;gap:9px;padding:9px 11px"><i class="ti ti-history" style="color:var(--accent-d)"></i>' +
+        '<div style="flex:1;font-size:12px;color:var(--text2)"><b style="color:var(--ink)">' + confirmed + ' of ' + sims.length + '</b> prior ' + window.APP.esc(a.fwaType) + ' cases were confirmed.</div>' +
+        '<span id="c-gosim" style="font-size:11.5px;color:var(--accent-d);cursor:pointer;font-weight:500;white-space:nowrap">Similar cases →</span></div>'
+      : '';
     return '<div style="display:flex;flex-direction:column;gap:10px">' +
       '<div class="card" id="c-decision"></div>' +
-      '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:500;font-size:13px">Similar adjudicated cases</div><span class="muted" style="font-size:11px">' + a.fwaType + ' · ' + simConfirmed + '/' + sims.length + ' confirmed</span></div>' + simsHtml + '<div id="c-prec"></div></div>' +
+      simLink +
       '<div class="card"><div style="font-weight:500;font-size:13px;margin-bottom:8px">Case timeline</div>' + timelineHtml(id, a, cl) + '</div>' +
       '</div>';
   }
@@ -602,13 +999,94 @@
     });
   }
 
+  // ---------- structured decision reason (the dropdown) ----------
+  // Hidden until an outcome is picked — the reason list is outcome-specific.
+  function reasonBlockHtml() {
+    return '<div id="c-reasonbox" style="display:none;margin-bottom:10px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">' +
+      '<span style="font-size:11px;color:var(--text2)"><span id="c-reason-label">Reason</span> <span style="color:var(--high-tx)">*</span> <span style="color:var(--text3)">· coded — drives reporting &amp; the provider notice</span></span>' +
+      '<span id="c-reason-sugg" class="muted" style="font-size:10.5px"></span></div>' +
+      '<select id="c-reason" class="input" style="font-size:12px"></select></div>';
+  }
+  // Fill the dropdown for the chosen outcome and preselect the suggested reason.
+  function fillReasons(a, outcome, labelText) {
+    var box = document.getElementById("c-reasonbox"), sel = document.getElementById("c-reason");
+    if (!box || !sel) return;
+    if (!outcome) { box.style.display = "none"; return; }
+    var list = window.APP.reasonsFor(outcome), sugg = window.APP.suggestedReason(a, outcome);
+    sel.innerHTML = '<option value="">— select a reason —</option>' + list.map(function (r) {
+      return '<option value="' + r.c + '"' + (r.c === sugg ? " selected" : "") + '>' + r.c + ' · ' + window.APP.esc(r.t) + '</option>';
+    }).join("");
+    var lab = document.getElementById("c-reason-label"); if (lab) lab.textContent = labelText || "Reason";
+    var sg = document.getElementById("c-reason-sugg");
+    if (sg) sg.innerHTML = sugg ? '<i class="ti ti-sparkles" style="color:var(--accent-d)"></i> suggested from the evidence — override if needed' : "";
+    box.style.display = "block";
+  }
+  // ---------- AI justification memo (generate → review → attach) ----------
+  // The analyst never attaches something they haven't read: generate shows the memo,
+  // attaching is a second, deliberate click.
+  function aiJustBlockHtml() {
+    return '<div id="c-aijust" style="margin-bottom:10px">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">' +
+      '<span style="font-size:11px;color:var(--text2)"><i class="ti ti-file-text" style="color:var(--accent-d)"></i> AI justification <span style="color:var(--text3)">· a formal memo for the case file, the provider notice or an appeal</span></span>' +
+      '<button id="c-aigen" class="btn" style="padding:4px 9px;font-size:11px" disabled><i class="ti ti-sparkles"></i> Generate justification</button></div>' +
+      '<div id="c-aijust-out"></div></div>';
+  }
+  function aiJustPreviewHtml(memo) {
+    return '<div style="border:0.5px solid var(--border);border-radius:8px;overflow:hidden;margin-top:7px">' +
+      '<div style="background:var(--surface);padding:7px 10px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;border-bottom:0.5px solid var(--border)">' +
+      '<span style="font-size:11.5px;font-weight:500"><i class="ti ti-file-text" style="color:var(--accent-d)"></i> Justification memo <span class="muted" style="font-weight:400">· review before attaching</span></span>' +
+      '<span style="display:flex;gap:6px"><button class="btn" id="c-ai-insert" style="padding:3px 8px;font-size:11px"><i class="ti ti-arrow-down"></i> Use as my justification</button>' +
+      '<button class="btn primary" id="c-ai-attach" style="padding:3px 8px;font-size:11px"><i class="ti ti-paperclip"></i> Attach to lead</button></span></div>' +
+      '<pre class="mono" id="c-ai-memo" style="margin:0;padding:10px 12px;font-size:10.5px;line-height:1.55;max-height:220px;overflow:auto;white-space:pre-wrap;background:#fff;color:var(--text)">' + window.APP.esc(memo) + '</pre></div>';
+  }
+  // Wire the generate/attach flow. getCtx() supplies the live outcome+reason at click
+  // time, because both change as the analyst edits the form.
+  function wireAiJust(id, a, getCtx, justFieldId) {
+    var gen = document.getElementById("c-aigen"); if (!gen) return;
+    gen.addEventListener("click", function () {
+      var c = getCtx(); if (!c.outcome) return;
+      var memo = window.AI.justificationMemo(a, {
+        outcome: c.outcome, reason: c.reason, reasonText: window.APP.reasonText(c.outcome, c.reason),
+        justification: (document.getElementById(justFieldId) || {}).value || "",
+        user: (window.APP.ROLES[window.APP.state.role] || {}).name
+      });
+      var out = document.getElementById("c-aijust-out");
+      out.innerHTML = aiJustPreviewHtml("");
+      window.APP.auditLog("AI_JUSTIFICATION_DRAFTED", "Lead #" + id + " · " + c.outcome + (c.reason ? " · " + c.reason : ""));
+      // stream it in so the generation reads as live
+      var pre = document.getElementById("c-ai-memo"), i = 0;
+      var iv = setInterval(function () {
+        i += 14; pre.textContent = memo.slice(0, i);
+        if (i >= memo.length) { clearInterval(iv); pre.textContent = memo; }
+      }, 12);
+      document.getElementById("c-ai-insert").addEventListener("click", function () {
+        clearInterval(iv); pre.textContent = memo;
+        var f = document.getElementById(justFieldId); if (f) { f.value = memo; f.dispatchEvent(new Event("input")); }
+      });
+      document.getElementById("c-ai-attach").addEventListener("click", function () {
+        clearInterval(iv); pre.textContent = memo;
+        var name = "AI-justification_Lead-" + id + "_" + c.outcome + ".txt";
+        window.APP.addArtifact(id, { name: name, kind: "ai-justification", body: memo });
+        out.innerHTML = '<div style="background:var(--low-bg);border:0.5px solid #bfe0c9;border-radius:7px;padding:8px 10px;margin-top:7px;font-size:11.5px;color:var(--low-tx)">' +
+          '<i class="ti ti-paperclip"></i> Attached to the lead as <b>' + window.APP.esc(name) + '</b> — it now appears under Evidence › Attached documents and in the History tab.</div>';
+      });
+    });
+  }
+
+  function reasonTag(outcome, code) {
+    if (!code) return "";
+    var t = window.APP.reasonText(outcome, code);
+    return '<div style="margin-top:5px"><span class="tag" style="background:var(--surface);border:0.5px solid var(--border)"><span class="mono">' + code + '</span> · ' + window.APP.esc(t || "") + '</span></div>';
+  }
+
   // prepay: Pay / Hold / Deny
   function renderPrepayDecision(id, a) {
     var box = document.getElementById("c-decision");
     var dec = window.APP.prepayDecisionFor(id);
     if (dec) {
       var m = { pay: ["Cleared to pay", "var(--low-tx)", "circle-check"], hold: ["On hold — records requested", "var(--med-tx)", "clock-hour-4"], deny: ["Denied — payment prevented", "var(--high-tx)", "ban"] }[dec.action];
-      box.innerHTML = '<div style="font-weight:500;font-size:13px;margin-bottom:9px">Pre-payment decision</div><div style="display:flex;align-items:center;gap:10px"><i class="ti ti-' + m[2] + '" style="color:' + m[1] + ';font-size:22px"></i><div><div style="font-weight:500;font-size:13px">' + m[0] + ' · ' + window.DP.usd(a.exposurePre || 0) + '</div><div style="font-size:11px;color:var(--text3);margin-top:4px">Logged to audit trail · ' + window.APP.fmtTs(dec.ts) + '</div></div></div>';
+      box.innerHTML = '<div style="font-weight:500;font-size:13px;margin-bottom:9px">Pre-payment decision</div><div style="display:flex;align-items:flex-start;gap:10px"><i class="ti ti-' + m[2] + '" style="color:' + m[1] + ';font-size:22px"></i><div><div style="font-weight:500;font-size:13px">' + m[0] + ' · ' + window.DP.usd(a.exposurePre || 0) + '</div>' + reasonTag(dec.action, dec.reason) + (dec.justification ? '<div style="font-size:11.5px;color:var(--text2);margin-top:4px">' + window.APP.esc(dec.justification) + '</div>' : '') + '<div style="font-size:11px;color:var(--text3);margin-top:4px">Logged to audit trail · ' + window.APP.fmtTs(dec.ts) + '</div></div></div>';
       return;
     }
     var rec = a.recommendedAction;
@@ -618,20 +1096,44 @@
       '<div style="display:flex;gap:8px;margin-bottom:10px">' +
       ppseg("pay", "check", "Pay", "releases payment") + ppseg("hold", "clock-hour-4", "Hold", "request records") + ppseg("deny", "ban", "Deny", "stop payment") + '</div>' +
       '<div id="c-pphint" style="font-size:11.5px;color:var(--text2);margin-bottom:8px;min-height:16px"></div>' +
-      '<button id="c-ppsubmit" class="btn primary" disabled><i class="ti ti-send"></i> Submit decision</button>';
+      reasonBlockHtml() +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px"><span style="font-size:11px;color:var(--text2)">Justification (logged for audit &amp; the provider notice)</span><button id="c-ppdraft" class="btn" style="padding:4px 9px;font-size:11px"><i class="ti ti-sparkles"></i>Draft with AI</button></div>' +
+      '<textarea id="c-ppjust" class="input" placeholder="Document your justification…"></textarea>' +
+      aiJustBlockHtml() +
+      '<button id="c-ppsubmit" class="btn primary" style="margin-top:9px" disabled><i class="ti ti-send"></i> Submit decision</button>';
     var choice = null;
     var segCls = { pay: "on-d", hold: "on-e", deny: "on-c" };
     var hints = { pay: "Releases " + window.DP.usd(a.exposurePre || 0) + " for payment — clean claim.", hold: "Holds the claim and requests supporting records before paying.", deny: "Denies the claim — " + window.DP.usd(a.exposurePre || 0) + " prevented from being paid." };
+    var reasonLabels = { pay: "Clearance reason", hold: "Hold reason", deny: "Deny reason" };
+    var ppValid = function () { var r = document.getElementById("c-reason"); return !!(choice && r && r.value); };
+    var refreshPp = function () {
+      document.getElementById("c-ppsubmit").disabled = !ppValid();
+      var g = document.getElementById("c-aigen"); if (g) g.disabled = !ppValid();
+    };
+    wireAiJust(id, a, function () { return { outcome: choice, reason: (document.getElementById("c-reason") || {}).value }; }, "c-ppjust");
     box.querySelectorAll(".seg").forEach(function (s) {
       s.addEventListener("click", function () {
         choice = s.getAttribute("data-d");
         box.querySelectorAll(".seg").forEach(function (x) { x.className = "seg"; });
         s.className = "seg " + segCls[choice];
         document.getElementById("c-pphint").textContent = hints[choice];
-        document.getElementById("c-ppsubmit").disabled = false;
+        fillReasons(a, choice, reasonLabels[choice]);
+        var rs = document.getElementById("c-reason"); if (rs) rs.onchange = refreshPp;
+        refreshPp();
       });
     });
-    document.getElementById("c-ppsubmit").addEventListener("click", function () { if (!choice) return; window.APP.prepayDecide(id, choice); rerender(id); });
+    document.getElementById("c-ppdraft").addEventListener("click", function () {
+      if (!choice) { document.getElementById("c-pphint").textContent = "Pick a decision first, then draft."; return; }
+      var ta = document.getElementById("c-ppjust");
+      var t = window.AI.draftRationale(a, choice), i = 0;
+      ta.value = "";
+      var iv = setInterval(function () { i += 3; ta.value = t.slice(0, i); if (i >= t.length) { clearInterval(iv); ta.value = t; } }, 12);
+    });
+    document.getElementById("c-ppsubmit").addEventListener("click", function () {
+      if (!ppValid()) return;
+      window.APP.prepayDecide(id, choice, document.getElementById("c-reason").value, document.getElementById("c-ppjust").value);
+      rerender(id);
+    });
   }
   function ppseg(d, icon, label, sub) { return '<div class="seg" data-d="' + d + '"><i class="ti ti-' + icon + '"></i> ' + label + '<div class="sub">' + sub + '</div></div>'; }
 
@@ -654,7 +1156,7 @@
           '<button class="btn" id="sv-ret"><i class="ti ti-corner-up-left"></i> Return</button>' +
           '<button class="btn primary" id="sv-appr" style="background:var(--low);border-color:var(--low)"><i class="ti ti-check"></i> Approve</button></div></div>';
       }
-      box.innerHTML = '<div style="font-weight:500;font-size:13px;margin-bottom:9px">Decision</div><div style="display:flex;align-items:flex-start;gap:10px"><i class="ti ti-' + icon + '" style="color:' + color + ';font-size:22px"></i><div><div style="font-weight:500;font-size:13px">' + msg + '</div>' + (dec.rationale ? '<div style="font-size:11.5px;color:var(--text2);margin-top:4px">' + window.APP.esc(dec.rationale) + '</div>' : '') + '<div style="font-size:11px;color:var(--text3);margin-top:5px">Logged to audit trail · ' + window.APP.fmtTs(dec.ts) + '</div></div></div>' + svPanel;
+      box.innerHTML = '<div style="font-weight:500;font-size:13px;margin-bottom:9px">Decision</div><div style="display:flex;align-items:flex-start;gap:10px"><i class="ti ti-' + icon + '" style="color:' + color + ';font-size:22px"></i><div><div style="font-weight:500;font-size:13px">' + msg + '</div>' + reasonTag(dec.outcome, dec.reason) + (dec.rationale ? '<div style="font-size:11.5px;color:var(--text2);margin-top:4px">' + window.APP.esc(dec.rationale) + '</div>' : '') + '<div style="font-size:11px;color:var(--text3);margin-top:5px">Logged to audit trail · ' + window.APP.fmtTs(dec.ts) + '</div></div></div>' + svPanel;
       if (dec.reviewState === "pending" && window.APP.isSupervisor()) {
         document.getElementById("sv-appr").addEventListener("click", function () { window.APP.supervisorAction(id, "approve"); rerender(id); });
         document.getElementById("sv-ret").addEventListener("click", function () { window.APP.supervisorAction(id, "return", document.getElementById("sv-note").value); rerender(id); });
@@ -666,43 +1168,73 @@
       return;
     }
     var returnedNote = (dec && dec.reviewState === "returned") ? (dec.returnNote || "(no note)") : null;
-    // case-assignment options (required when confirming/escalating): open a new case
-    // or add this lead to an existing one.
+    // Where the lead lands (required when confirming/escalating). The engine ranks
+    // the candidate cases and says WHY each is a candidate, so the analyst chooses
+    // between explanations rather than reading a flat list of provider names.
     var openCases = window.DP.listCases({ mode: "retrospective" }).filter(function (c) { return !c.closed; });
-    var provCase = window.DP.getCase(a.providerId, "retrospective");
-    var provHasCase = !!(provCase && !provCase.closed && provCase.leadCount > 0);
-    var caseOpts = openCases.map(function (c) { return '<option value="' + c.caseKey + '" data-name="' + window.APP.esc(c.name) + '"' + (provHasCase && c.caseKey === provCase.caseKey ? " selected" : "") + '>' + window.APP.esc(c.name) + ' · CASE-' + c.providerId + ' (' + c.leadCount + ' lead' + (c.leadCount === 1 ? '' : 's') + (c.multiProvider ? ', ' + c.providerCount + ' providers' : '') + ')</option>'; }).join("");
+    var sugg = window.APP.suggestCases(a);
+    var best = sugg[0] || null;
+    var others = openCases.filter(function (c) { return !sugg.some(function (s) { return s.c.caseKey === c.caseKey; }); });
+    var suggRows = sugg.map(function (s, i) {
+      return '<label class="c-sugg" style="display:flex;gap:8px;align-items:flex-start;padding:7px 8px;border:0.5px solid ' + (i === 0 ? "#cfe7e3" : "var(--border)") + ';border-radius:7px;margin-bottom:5px;cursor:pointer;background:' + (i === 0 ? "var(--accent-l)" : "#fff") + '">' +
+        '<input type="radio" name="c-casemode" value="existing" data-key="' + s.c.caseKey + '" data-name="' + window.APP.esc(s.c.name) + '" data-link="' + s.linkType + '" style="margin-top:2px"' + (i === 0 ? " checked" : "") + '>' +
+        '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:500">' + window.APP.esc(s.c.name) +
+        ' <span class="muted" style="font-weight:400">· CASE-' + s.c.providerId + ' · ' + s.c.leadCount + ' lead' + (s.c.leadCount === 1 ? '' : 's') + ' · ' + window.DP.usd(s.c.exposure || 0) + '</span>' +
+        (i === 0 ? ' <span class="tag" style="background:var(--accent);color:#fff">suggested</span>' : '') + '</div>' +
+        '<div style="font-size:11px;color:var(--text2);margin-top:1px">' + window.APP.esc(s.why) + '</div>' +
+        '<div style="margin-top:3px"><span class="tag" style="background:#fff;border:0.5px solid var(--border)"><i class="ti ti-link"></i> ' + window.APP.esc(window.APP.leadLinkLabel(s.linkType)) + '</span></div>' +
+        '</div></label>';
+    }).join("");
     var caseBlockHtml =
       '<div id="c-case" style="display:none;background:var(--surface);border:0.5px solid var(--border);border-radius:8px;padding:9px 11px;margin-bottom:10px">' +
-      '<div style="font-size:11.5px;font-weight:500;margin-bottom:6px"><i class="ti ti-folder" style="color:var(--accent-d)"></i> Case assignment <span style="color:var(--high-tx)">*</span> <span class="muted" style="font-weight:400;font-size:11px">· required — a confirmed lead must belong to a case</span></div>' +
-      '<label style="display:flex;align-items:center;gap:7px;font-size:12px;margin-bottom:5px;cursor:pointer"><input type="radio" name="c-casemode" value="new"' + (provHasCase ? "" : " checked") + '> Open a <b>new</b> case for ' + window.APP.esc(a.provider ? a.provider.name : "this provider") + '</label>' +
-      '<label style="display:flex;align-items:center;gap:7px;font-size:12px;cursor:' + (openCases.length ? "pointer" : "not-allowed") + '"><input type="radio" name="c-casemode" value="existing"' + (provHasCase ? " checked" : "") + (openCases.length ? "" : " disabled") + '> Add to an <b>existing</b> case</label>' +
-      '<select id="c-case-sel" class="input" style="margin-top:6px;font-size:12px;' + (provHasCase ? "" : "display:none") + '">' + (caseOpts || '<option value="">No open cases</option>') + '</select>' +
+      '<div style="font-size:11.5px;font-weight:500;margin-bottom:2px"><i class="ti ti-folder" style="color:var(--accent-d)"></i> Convert to a case <span style="color:var(--high-tx)">*</span></div>' +
+      '<div class="muted" style="font-size:11px;margin-bottom:7px">This lead does not get paid — it has to land somewhere. Add it to an existing case or open a new one.</div>' +
+      suggRows +
+      '<label style="display:flex;gap:8px;align-items:flex-start;padding:7px 8px;border:0.5px solid var(--border);border-radius:7px;cursor:pointer;background:#fff">' +
+      '<input type="radio" name="c-casemode" value="new" style="margin-top:2px"' + (best ? "" : " checked") + '>' +
+      '<div><div style="font-size:12px;font-weight:500">Open a new case for ' + window.APP.esc(a.provider ? a.provider.name : "this provider") + '</div>' +
+      '<div style="font-size:11px;color:var(--text2);margin-top:1px">' + (best ? "Use this if the lead is unrelated to the cases above." : "No open case is a candidate for this lead.") + '</div></div></label>' +
+      (others.length ? '<div style="margin-top:7px"><label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-size:12px">' +
+        '<input type="radio" name="c-casemode" value="other"> Add to another open case</label>' +
+        '<select id="c-case-sel" class="input" style="margin-top:5px;font-size:12px;display:none">' +
+        others.map(function (c) { return '<option value="' + c.caseKey + '" data-name="' + window.APP.esc(c.name) + '">' + window.APP.esc(c.name) + ' · CASE-' + c.providerId + ' (' + c.leadCount + ' lead' + (c.leadCount === 1 ? '' : 's') + (c.multiProvider ? ', ' + c.providerCount + ' providers' : '') + ')</option>'; }).join("") + '</select></div>' : '') +
       '</div>';
     box.innerHTML =
       '<div style="font-weight:500;font-size:13px;margin-bottom:9px">Decision</div>' +
       (returnedNote !== null ? '<div style="background:var(--med-bg);border:0.5px solid #e7c99a;border-radius:7px;padding:8px 10px;font-size:11.5px;color:var(--med-tx);margin-bottom:10px"><i class="ti ti-corner-up-left"></i> Returned by supervisor (Karen Boyd): ' + window.APP.esc(returnedNote) + ' — please revise and resubmit.</div>' : '') +
       '<div style="display:flex;gap:8px;margin-bottom:10px">' +
-      '<div class="seg" data-d="c"><i class="ti ti-check"></i> Confirm<div class="sub">recommend recovery</div></div>' +
-      '<div class="seg" data-d="d"><i class="ti ti-x"></i> Dismiss<div class="sub">false positive</div></div>' +
-      '<div class="seg" data-d="e"><i class="ti ti-arrow-up-right"></i> Escalate<div class="sub">to a case</div></div></div>' +
+      '<div class="seg" data-d="c"><i class="ti ti-check"></i> Confirm<div class="sub">improper — convert to a case</div></div>' +
+      '<div class="seg" data-d="d"><i class="ti ti-x"></i> Dismiss<div class="sub">clean — payment stands</div></div>' +
+      '<div class="seg" data-d="e"><i class="ti ti-arrow-up-right"></i> Escalate<div class="sub">coordinated — convert to a case</div></div></div>' +
       '<div id="c-hint" style="font-size:11.5px;color:var(--text2);margin-bottom:8px;min-height:16px"></div>' +
       caseBlockHtml +
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px"><span style="font-size:11px;color:var(--text2)">Rationale (logged for audit &amp; model retraining)</span><button id="c-draft" class="btn" style="padding:4px 9px;font-size:11px"><i class="ti ti-sparkles"></i>Draft with AI</button></div>' +
-      '<textarea id="c-rat" class="input" placeholder="Document your rationale…"></textarea>' +
+      reasonBlockHtml() +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px"><span style="font-size:11px;color:var(--text2)">Justification (logged for audit &amp; model retraining)</span><button id="c-draft" class="btn" style="padding:4px 9px;font-size:11px"><i class="ti ti-sparkles"></i>Draft with AI</button></div>' +
+      '<textarea id="c-rat" class="input" placeholder="Document your justification…"></textarea>' +
+      aiJustBlockHtml() +
       '<button id="c-submit" class="btn primary" style="margin-top:9px" disabled><i class="ti ti-send"></i>Submit decision</button>';
     var choice = null;
     var outMap = { c: "confirm", d: "dismiss", e: "escalate" };
-    var hints = { c: "Confirms improper payment — " + window.DP.usd(a.exposurePost) + " moves to Submitted for recovery. Assign it to a case below.", d: "Logged as a false positive — outcome feeds model retraining. No case is opened.", e: "Escalates as coordinated behavior for investigation. Assign it to a case below." };
+    var hints = {
+      c: "Confirms improper payment — " + window.DP.usd(a.exposurePost) + " moves to Submitted for recovery. The lead converts to a case below.",
+      d: "The claim is clean — payment stands and nothing is recovered. Logged as a false positive so the outcome feeds model retraining; no case is opened.",
+      e: "Escalates as coordinated behavior for investigation. The lead converts to a case below."
+    };
     var needsCase = function () { return choice === "c" || choice === "e"; };
     var caseValid = function () {
       if (!needsCase()) return true;
       var m = box.querySelector('input[name="c-casemode"]:checked');
       if (!m) return false;
-      if (m.value === "existing") { var sel = document.getElementById("c-case-sel"); return !!(sel && sel.value); }
+      if (m.value === "other") { var sel = document.getElementById("c-case-sel"); return !!(sel && sel.value); }
       return true;
     };
-    var refreshSubmit = function () { document.getElementById("c-submit").disabled = !(choice && caseValid()); };
+    var reasonValid = function () { var r = document.getElementById("c-reason"); return !!(r && r.value); };
+    var refreshSubmit = function () {
+      document.getElementById("c-submit").disabled = !(choice && caseValid() && reasonValid());
+      var g = document.getElementById("c-aigen"); if (g) g.disabled = !(choice && reasonValid());
+    };
+    var reasonLabels = { c: "Confirmation reason", d: "Dismiss reason", e: "Escalation reason" };
+    wireAiJust(id, a, function () { return { outcome: outMap[choice], reason: (document.getElementById("c-reason") || {}).value }; }, "c-rat");
     box.querySelectorAll(".seg").forEach(function (s) {
       s.addEventListener("click", function () {
         choice = s.getAttribute("data-d");
@@ -710,12 +1242,14 @@
         s.className = "seg on-" + choice;
         document.getElementById("c-hint").textContent = hints[choice];
         var cb = document.getElementById("c-case"); if (cb) cb.style.display = needsCase() ? "block" : "none";
+        fillReasons(a, outMap[choice], reasonLabels[choice]);
+        var rs = document.getElementById("c-reason"); if (rs) rs.onchange = refreshSubmit;
         refreshSubmit();
       });
     });
     box.querySelectorAll('input[name="c-casemode"]').forEach(function (r) {
       r.addEventListener("change", function () {
-        var sel = document.getElementById("c-case-sel"); if (sel) sel.style.display = (this.value === "existing") ? "block" : "none";
+        var sel = document.getElementById("c-case-sel"); if (sel) sel.style.display = (this.value === "other") ? "block" : "none";
         refreshSubmit();
       });
     });
@@ -728,16 +1262,21 @@
       var iv = setInterval(function () { i += 3; ta.value = t.slice(0, i); if (i >= t.length) { clearInterval(iv); ta.value = t; } }, 12);
     });
     document.getElementById("c-submit").addEventListener("click", function () {
-      if (!choice || !caseValid()) return;
+      if (!choice || !caseValid() || !reasonValid()) return;
       var rationale = document.getElementById("c-rat").value;
+      var reason = document.getElementById("c-reason").value;
       if (needsCase()) {
         var m = box.querySelector('input[name="c-casemode"]:checked');
         if (m && m.value === "existing") {
+          // a ranked suggestion — it carries its own case key and link type
+          window.APP.setLeadCase(id, { mode: "existing", caseKey: m.getAttribute("data-key"), caseName: m.getAttribute("data-name"), linkType: m.getAttribute("data-link") });
+        } else if (m && m.value === "other") {
           var sel = document.getElementById("c-case-sel"), opt = sel.options[sel.selectedIndex];
-          window.APP.setLeadCase(id, { mode: "existing", caseKey: sel.value, caseName: opt ? opt.getAttribute("data-name") : null });
-        } else { window.APP.setLeadCase(id, { mode: "new" }); }
+          var target = window.DP.listCases({ mode: "retrospective" }).find(function (c) { return c.caseKey === sel.value; });
+          window.APP.setLeadCase(id, { mode: "existing", caseKey: sel.value, caseName: opt ? opt.getAttribute("data-name") : null, linkType: window.APP.suggestLinkType(a, target) });
+        } else { window.APP.setLeadCase(id, { mode: "new", linkType: "same-provider" }); }
       }
-      window.APP.applyDecision(id, outMap[choice], rationale);
+      window.APP.applyDecision(id, outMap[choice], rationale, reason);
       rerender(id);
     });
   }
@@ -763,8 +1302,8 @@
 
   // ---------- export (CSV / Excel / PDF of the case) ----------
   function wireExport(id, a, cl, p, prepay, kind) {
-    var clHead = ["CPT", "Description", "Modifiers", "Units", "Billed", "Allowed", "Paid", "Flagged"];
-    var clRows = cl ? cl.lines.map(function (l) { return [l.cpt, l.description, (l.modifiers || []).join(" "), l.units, l.billed, l.allowed, l.paid, (l.violatesRuleIds || []).length ? "Yes" : "No"]; }) : [];
+    var clHead = ["CPT", "Description", "Modifiers", "Units", "Billed", "Allowed", "Exposure (" + exposureType(a).toLowerCase() + ")", "Flagged"];
+    var clRows = cl ? cl.lines.map(function (l) { return [l.cpt, l.description, (l.modifiers || []).join(" "), l.units, l.billed, l.allowed, lineExposure(l, prepay), (l.violatesRuleIds || []).length ? "Yes" : "No"]; }) : [];
     window.EXPORT.wire("c", {
       csv: function () { window.EXPORT.csv("claim-" + id, clHead, clRows); },
       xls: function () { window.EXPORT.xls("claim-" + id, "Claim " + id, clHead, clRows); },

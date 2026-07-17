@@ -41,13 +41,21 @@
               '<td>' + (types || '<span class="muted">—</span>') + '</td>' +
               '<td style="color:' + (c.assignee ? "var(--ink)" : "var(--text3)") + ';font-size:11.5px">' + window.APP.esc(c.assignee || "Unassigned") + '</td>' +
               '<td class="right" style="font-weight:500">' + window.DP.usd(c.exposure || 0) + '</td>' +
-              (showActions ? '<td class="right">' + (c.closed ? '<button class="btn case-reopen" data-pid="' + c.providerId + '" style="font-size:11px;padding:3px 8px"><i class="ti ti-rotate"></i> Reopen</button>' : '<button class="btn case-close" data-pid="' + c.providerId + '" style="font-size:11px;padding:3px 8px"><i class="ti ti-checkbox"></i> Close</button>') + '</td>' : '') +
+              (showActions ? '<td class="right">' + (c.closed ? '<button class="btn case-reopen" data-pid="' + c.providerId + '" style="font-size:11px;padding:3px 8px"><i class="ti ti-rotate"></i> Reopen</button>' : '<button class="btn case-close" data-pid="' + c.providerId + '" style="font-size:11px;padding:3px 8px"><i class="ti ti-checkbox"></i> Review &amp; close</button>') + '</td>' : '') +
               '</tr>';
           }).join("") + '</tbody></table></div>'
           : '<div class="card" style="text-align:center;padding:32px"><i class="ti ti-folder-open" style="font-size:28px;color:var(--text3)"></i><div style="font-size:13px;color:var(--text2);margin-top:8px">No cases yet.</div><div style="font-size:11.5px;color:var(--text3);margin-top:3px">Confirm or escalate a lead in the work queue to open a provider case.</div></div>') +
         '</div>';
       var reRender = function () { window.Views.investigations.render(mount); };
-      mount.querySelectorAll(".case-close").forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); window.APP.closeCase(b.getAttribute("data-pid"), "Resolved by supervisor"); reRender(); }); });
+      // Closing needs a reason and a narrative, so it happens on the case page with
+      // the case in front of you — not blind from a list row.
+      mount.querySelectorAll(".case-close").forEach(function (b) {
+        b.addEventListener("click", function (e) {
+          e.stopPropagation();
+          window.APP.state.caseCloseIntent = b.getAttribute("data-pid");
+          window.APP.openProvider(b.getAttribute("data-pid"));
+        });
+      });
       mount.querySelectorAll(".case-reopen").forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); window.APP.reopenCase(b.getAttribute("data-pid")); reRender(); }); });
       mount.querySelectorAll("tr.row").forEach(function (tr) { tr.addEventListener("click", function () { window.APP.openProvider(tr.getAttribute("data-pid")); }); });
     }

@@ -100,6 +100,47 @@
     },
 
     getTrends: function () { return D.trends || []; },
+
+    // ---- rule taxonomy (derived, no data regen) ----
+    // Every rule is classifiable along five dimensions the compliance program uses.
+    // Existing generator rules get their tags here; a few catalog-only rules are
+    // appended so each dimension value has real coverage (exclusion, anti-kickback,
+    // phantom billing, DME, beneficiary have no firing rule in the seed data).
+    RULE_DIMENSIONS: [
+      { key: "regulatorySource", label: "Regulatory source", values: ["CMS NCCI edits", "CMS payment rules", "VA CCN policy", "False Claims Act", "Anti-Kickback Statute", "OIG advisories"] },
+      { key: "entityType", label: "Entity type", values: ["Provider", "DME supplier", "Beneficiary"] },
+      { key: "fraudType", label: "Fraud type", values: ["Upcoding", "Unbundling", "Phantom billing", "Medically unnecessary", "Duplicate billing", "Exclusion violations", "Kickback / self-referral", "Authorization / coverage", "Overpayment / pricing", "Workflow"] },
+      { key: "detectionLevel", label: "Detection level", values: ["Claim-level", "Provider-pattern", "Network-level"] },
+      { key: "severity", label: "Severity", values: ["Critical", "High", "Medium", "Low"] }
+    ],
+    // taxonomy for the 8 generator rules, keyed by rule id
+    RULE_TAXONOMY: {
+      rule_ncci_43235_43239: { regulatorySource: "CMS NCCI edits", entityType: "Provider", fraudType: "Unbundling", detectionLevel: "Claim-level", severity: "High" },
+      rule_mue: { regulatorySource: "CMS NCCI edits", entityType: "Provider", fraudType: "Medically unnecessary", detectionLevel: "Claim-level", severity: "Medium" },
+      rule_mod59: { regulatorySource: "CMS NCCI edits", entityType: "Provider", fraudType: "Unbundling", detectionLevel: "Provider-pattern", severity: "High" },
+      rule_mppr: { regulatorySource: "CMS payment rules", entityType: "Provider", fraudType: "Overpayment / pricing", detectionLevel: "Claim-level", severity: "Low" },
+      rule_fee: { regulatorySource: "VA CCN policy", entityType: "Provider", fraudType: "Overpayment / pricing", detectionLevel: "Claim-level", severity: "Medium" },
+      rule_dup: { regulatorySource: "VA CCN policy", entityType: "Provider", fraudType: "Duplicate billing", detectionLevel: "Claim-level", severity: "High" },
+      rule_auth: { regulatorySource: "VA CCN policy", entityType: "Provider", fraudType: "Authorization / coverage", detectionLevel: "Claim-level", severity: "Medium" },
+      rule_payreport: { regulatorySource: "VA CCN policy", entityType: "Provider", fraudType: "Workflow", detectionLevel: "Claim-level", severity: "Low" }
+    },
+    // catalog-only rules that broaden coverage across every dimension
+    RULE_CATALOG_EXTRA: [
+      { id: "rule_em_level", code: "EM-LEVEL", name: "E/M level validation", source: "CMS payment rules", category: "Coding", description: "Evaluation & management level billed exceeds the documented history/exam/decision-making and the provider's peer-group distribution.", version: "2.1", effectiveDate: "2025-01-01", environment: "Production", regulatorySource: "CMS payment rules", entityType: "Provider", fraudType: "Upcoding", detectionLevel: "Provider-pattern", severity: "High" },
+      { id: "rule_phantom", code: "SVC-RENDERED", name: "Services-not-rendered screen", source: "False Claims Act", category: "Integrity", description: "Billed service has no corroborating encounter, attendance or delivery record for the date of service.", version: "1.3", effectiveDate: "2024-11-01", environment: "Production", regulatorySource: "False Claims Act", entityType: "Provider", fraudType: "Phantom billing", detectionLevel: "Claim-level", severity: "Critical" },
+      { id: "rule_mednec", code: "MED-NEC", name: "Medical-necessity / level-of-care", source: "VA CCN policy", category: "Coverage", description: "Level of care or length of stay exceeds clinical criteria (MCG) for the documented condition.", version: "1.6", effectiveDate: "2024-12-01", environment: "Production", regulatorySource: "VA CCN policy", entityType: "Provider", fraudType: "Medically unnecessary", detectionLevel: "Provider-pattern", severity: "High" },
+      { id: "rule_excl", code: "EXCL-LEIE", name: "OIG LEIE exclusion screening", source: "OIG advisories", category: "Integrity", description: "Rendering or billing provider (or ordering physician) appears on the OIG List of Excluded Individuals/Entities — claims paid during exclusion are recoverable in full.", version: "2.0", effectiveDate: "2025-01-01", environment: "Production", regulatorySource: "OIG advisories", entityType: "Provider", fraudType: "Exclusion violations", detectionLevel: "Provider-pattern", severity: "Critical" },
+      { id: "rule_aks", code: "AKS-STARK", name: "Anti-kickback / self-referral", source: "Anti-Kickback Statute", category: "Integrity", description: "Referral or financial-arrangement pattern between linked entities indicates a prohibited inducement or self-referral.", version: "1.1", effectiveDate: "2024-10-15", environment: "Production", regulatorySource: "Anti-Kickback Statute", entityType: "Provider", fraudType: "Kickback / self-referral", detectionLevel: "Network-level", severity: "Critical" },
+      { id: "rule_dme", code: "DME-NEC", name: "DME medical necessity & delivery", source: "VA CCN policy", category: "Coverage", description: "Durable medical equipment billed without a supporting order, proof of delivery, or documented medical necessity.", version: "1.2", effectiveDate: "2024-09-15", environment: "Production", regulatorySource: "VA CCN policy", entityType: "DME supplier", fraudType: "Medically unnecessary", detectionLevel: "Claim-level", severity: "Medium" },
+      { id: "rule_benelig", code: "BEN-ELIG", name: "Beneficiary eligibility & identity", source: "VA CCN policy", category: "Coverage", description: "Service billed for a date the beneficiary was ineligible, deceased, or where identity could not be verified.", version: "1.0", effectiveDate: "2025-02-01", environment: "Production", regulatorySource: "VA CCN policy", entityType: "Beneficiary", fraudType: "Phantom billing", detectionLevel: "Claim-level", severity: "High" }
+    ],
+    ruleTaxonomyFor: function (id) { return this.RULE_TAXONOMY[id] || null; },
+    // full catalog: generator rules enriched with taxonomy + the catalog-only rules.
+    getRuleCatalog: function () {
+      var tax = this.RULE_TAXONOMY;
+      var base = (D.rules || []).map(function (r) { return Object.assign({}, r, tax[r.id] || {}); });
+      return base.concat(this.RULE_CATALOG_EXTRA);
+    },
     getRules: function () { return D.rules; },
     getModels: function () { return D.models; },
     getPrecedent: function (pid) { return (D.precedents || []).find(function (p) { return p.id === pid; }) || null; },
@@ -250,6 +291,69 @@
       };
     },
 
+    // ---- licensure & credentials (incl. OIG LEIE exclusion) ----
+    // Derived here (static, seeded per provider — no data.js regen). Identifiers are
+    // impossible-to-be-real by construction: license numbers carry a 0000 block, DEA
+    // numbers deliberately fail the checksum. Excluded-while-billing is an automatic
+    // finding, so the OIG LEIE exclusions are a small curated list (LEIE is itself a
+    // specific list) and surface as the headline credential signal.
+    LEIE_EXCLUSIONS: {
+      PR301: { basis: "1128(b)(4)", reason: "Licensure revocation / suspension in another state", since: "2024-08-19", reinstatement: null, npiOnList: true },
+      PR205: { basis: "1128(a)(3)", reason: "Felony conviction — health-care fraud", since: "2023-11-02", reinstatement: "2028-11-02", npiOnList: true }
+    },
+    getLicensure: function (id) {
+      var p = providers[id]; if (!p) return null;
+      var tax = p.taxonomyCode || "";
+      var isOrg = /^3/.test(tax) || /^28/.test(tax) || /^251/.test(tax);
+      var seed = 0; for (var i = 0; i < id.length; i++) seed = (seed * 31 + id.charCodeAt(i)) >>> 0;
+      var rnd = function () { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
+      var yr = function (min, max) { return (min + Math.floor(rnd() * (max - min + 1))); };
+      var n4 = function () { return String(1000 + Math.floor(rnd() * 8999)); };
+      var st = p.state || "TX";
+      var excl = this.LEIE_EXCLUSIONS[id] || null;
+      var risk = p.riskScore || 0;
+
+      // Credential friction is reserved for high-risk providers so a clean peer reads
+      // as genuinely clear. A lapsed license/DEA/board cert is a softer signal than
+      // exclusion; a revalidation-due is benign/administrative. Deterministic per seed.
+      var lapse = !excl && risk >= 82 && rnd() > 0.45;
+      var deaExpired = !excl && risk >= 82 && rnd() > 0.5;
+      var boardExpired = !excl && risk >= 85 && rnd() > 0.5;
+      var revalDue = !excl && risk >= 65 && rnd() > 0.5;
+
+      var creds = [];
+      if (isOrg) {
+        creds.push({ type: "State facility license", authority: st + " Dept. of Health", number: st + "-FAC-0000" + n4().slice(-3), status: (excl ? "Suspended" : lapse ? "Lapsed — renewal pending" : "Active"), expires: yr(2026, 2028) + "-0" + (1 + Math.floor(rnd() * 8)) + "-15" });
+        creds.push({ type: "Accreditation", authority: rnd() > 0.5 ? "CARF" : "The Joint Commission", number: "ACR-0000" + n4().slice(-3), status: excl ? "Under review" : "Accredited", expires: yr(2026, 2027) + "-11-30" });
+      } else {
+        creds.push({ type: "State medical license", authority: st + " Medical Board", number: st + "-MD-0000" + n4().slice(-3), status: (excl ? "Suspended" : lapse ? "Lapsed — renewal pending" : "Active"), expires: yr(2026, 2028) + "-0" + (1 + Math.floor(rnd() * 8)) + "-31" });
+        creds.push({ type: "DEA registration", authority: "DEA", number: "B" + String.fromCharCode(65 + Math.floor(rnd() * 26)) + "0000000", status: (excl ? "Retired" : deaExpired ? "Expired" : "Active"), expires: yr(2025, 2027) + "-06-30" });
+        creds.push({ type: "Board certification", authority: p.taxonomyLabel || "Specialty board", number: "ABMS-0000" + n4().slice(-3), status: excl ? "Not certified" : boardExpired ? "Expired" : "Certified", expires: yr(2026, 2030) + "-12-31" });
+      }
+      creds.push({ type: "Medicare/PECOS enrollment", authority: "CMS", number: "PECOS-" + (p.npi || id), status: excl ? "Deactivated" : revalDue ? "Revalidation due" : "Enrolled", expires: revalDue ? yr(2026, 2026) + "-09-30" : yr(2027, 2028) + "-03-31" });
+
+      // alerts, most severe first
+      var alerts = [];
+      if (excl) alerts.push({ sev: "high", text: "OIG LEIE exclusion — excluded from all federal health-care programs; claims paid during exclusion are recoverable in full." });
+      creds.forEach(function (c) {
+        if (/Suspended|Lapsed|Expired|Deactivated|Retired|Under review/.test(c.status) && !(excl && c.status === "Suspended"))
+          alerts.push({ sev: c.status === "Expired" && c.type === "Board certification" ? "med" : "med", text: c.type + " " + c.status.toLowerCase() + " (" + c.authority + ")." });
+        if (c.status === "Revalidation due") alerts.push({ sev: "low", text: "Medicare revalidation due " + c.expires + "." });
+      });
+
+      return {
+        isOrg: isOrg,
+        entityType: isOrg ? "Facility / organization" : "Individual practitioner",
+        credentials: creds,
+        exclusion: excl ? { basis: excl.basis, reason: excl.reason, since: excl.since, reinstatement: excl.reinstatement, npiOnList: excl.npiOnList } : null,
+        excluded: !!excl,
+        alerts: alerts,
+        // a benign revalidation-due (low sev) alone does not warrant "Action needed"
+        status: excl ? "Excluded" : alerts.some(function (x) { return x.sev !== "low"; }) ? "Action needed" : "Clear"
+      };
+    },
+    isExcluded: function (id) { return !!this.LEIE_EXCLUSIONS[id]; },
+
     // ---- provider report card (radar spokes + drill-down) ----
     getGroups: function () { var p = D.providers.find(function (x) { return x.groupScores; }); return p ? p.groupScores.map(function (g) { return g.group; }) : []; },
     getReportCard: function (id) { var p = providers[id]; return p ? { groups: p.groupScores || [], attributes: p.groupAttributes || {} } : null; },
@@ -364,7 +468,231 @@
         source: "Zellis — CMS reference pricing", asOf: "2025 CMS fee schedules", locality: (p.state || "TX") + " · locality 05",
         lines: lines,
         totals: { submitted: sum("submittedCharge"), cmsAllowed: sum("cmsAllowed"), paid: sum("paid"), variance: Math.round((sum("submittedCharge") - sum("cmsAllowed")) * 100) / 100, overpayment: Math.round(Math.max(0, sum("paid") - sum("cmsAllowed")) * 100) / 100 },
-        rulesApplied: ["MPFS locality adjustment (" + (p.state || "TX") + " 05)", inst ? "OPPS status-indicator pricing" : "RVU × conversion factor ($32.74)", "MPPR — multiple-procedure payment reduction", "NCCI PTP bundling edits", "Site-of-service differential"]
+        rulesApplied: ["MPFS locality adjustment (" + (p.state || "TX") + " 05)", inst ? "OPPS status-indicator pricing" : "RVU × conversion factor ($32.74)", "MPPR — multiple-procedure payment reduction", "NCCI PTP bundling edits", "Site-of-service differential"],
+        ruleVersions: this.getPricingRuleVersions(claimId)
+      };
+    },
+    // Version history for the pricing rules that priced the claim. Static / synthetic
+    // (no data regen). A claim's date of service could fall under a prior version —
+    // this surfaces what changed and when, so the reviewer can see the lineage of the
+    // rates applied. Effective as of DOS is the one that priced the claim.
+    getPricingRuleVersions: function (claimId) {
+      var cl = claims[claimId]; if (!cl) return [];
+      var p = providers[cl.providerId] || {}, st = p.state || "TX", inst = cl.type === "837I";
+      return [
+        {
+          name: "MPFS conversion factor", authority: "CMS", current: { version: "CY2025", effective: "2025-01-01", value: "$32.74 / RVU" },
+          note: "The dollar multiplier applied to each code's relative value units. Updated annually in the Medicare Physician Fee Schedule final rule.",
+          history: [
+            { version: "CY2024", effective: "2024-01-01", value: "$33.89 / RVU", change: "−3.4% CF reduction (CY2025 final rule)" },
+            { version: "CY2023", effective: "2023-01-01", value: "$33.06 / RVU", change: "CF set by CY2024 final rule" }
+          ]
+        },
+        {
+          name: "GPCI locality adjustment", authority: "CMS", current: { version: "CY2025 GPCI", effective: "2025-01-01", value: st + " · locality 05" },
+          note: "Geographic Practice Cost Index — adjusts the fee for local cost differences.",
+          history: [
+            { version: "CY2024 GPCI", effective: "2024-01-01", value: st + " · locality 05", change: "Work/PE/MP indices refreshed" },
+            { version: "CY2023 GPCI", effective: "2023-01-01", value: st + " · locality 05", change: "Prior triennial GPCI update" }
+          ]
+        },
+        {
+          name: "MPPR — multiple-procedure payment reduction", authority: "CMS", current: { version: "v1.0", effective: "2024-07-01", value: "50% on 2nd+ procedure" },
+          note: "Reduces payment for the second and subsequent procedures billed in the same session.",
+          history: [
+            { version: "v0.9", effective: "2023-01-01", value: "25% on 2nd+ procedure", change: "Reduction increased 25% → 50%" }
+          ]
+        },
+        {
+          name: inst ? "OPPS status-indicator pricing" : "RVU relative value file", authority: "CMS", current: { version: inst ? "CY2025 OPPS" : "CY2025 RVU", effective: "2025-01-01", value: inst ? "APC weights CY2025" : "RVUs CY2025" },
+          note: inst ? "Outpatient Prospective Payment System — APC weights and status indicators." : "Work / practice-expense / malpractice RVUs per code.",
+          history: [
+            { version: inst ? "CY2024 OPPS" : "CY2024 RVU", effective: "2024-01-01", value: inst ? "APC weights CY2024" : "RVUs CY2024", change: "Annual valuation update" }
+          ]
+        },
+        {
+          name: "NCCI PTP edit set", authority: "CMS NCCI", current: { version: "v31.1", effective: "2025-01-01", value: "Q1 CY2025 edit file" },
+          note: "Procedure-to-procedure bundling edits, refreshed quarterly.",
+          history: [
+            { version: "v30.3", effective: "2024-10-01", value: "Q4 CY2024 edit file", change: "212 pairs added, 47 removed" },
+            { version: "v30.0", effective: "2024-01-01", value: "Q1 CY2024 edit file", change: "Annual baseline refresh" }
+          ]
+        },
+        {
+          name: "VA fee schedule / CMAC allowance", authority: "VA CCN", current: { version: "v3.1", effective: "2025-01-15", value: "CMAC table 2025" },
+          note: "VA Community Care allowance table used where it governs over MPFS.",
+          history: [
+            { version: "v3.0", effective: "2024-07-01", value: "CMAC table 2024 H2", change: "Mid-year CMAC refresh" },
+            { version: "v2.4", effective: "2024-01-01", value: "CMAC table 2024 H1", change: "Annual CMAC update" }
+          ]
+        }
+      ];
+    },
+
+    // ---- provider contact (for records requests) ----
+    // Deterministic, and impossible-to-be-real by construction: fax numbers sit in the
+    // 555-01xx block reserved for fiction, and email uses the reserved example.com
+    // domain. Derived here rather than generated so the dataset stays byte-stable.
+    AREA_BY_STATE: { TX: "210", AZ: "602", CA: "619", NV: "702", NM: "505", OK: "405", LA: "504", AR: "501" },
+    getProviderContact: function (pid) {
+      var p = providers[pid]; if (!p) return null;
+      var digits = String(pid).replace(/\D/g, "") || "0";
+      var last2 = String(Number(digits) % 100).padStart(2, "0");
+      var area = this.AREA_BY_STATE[p.state] || "210";
+      var slug = String(p.name || "provider").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").split("-").slice(0, 3).join("-");
+      return {
+        fax: "+1 (" + area + ") 555-01" + last2,
+        email: "records@" + slug + ".example.com",
+        portal: "VA Provider Portal · " + (p.npi || pid),
+        attention: "Health Information Management / Release of Information"
+      };
+    },
+
+    // ---- facility capacity (beds vs patient-days billed) ----
+    // Only meaningful for bedded facilities (residential / inpatient). The fraud
+    // signal is billing more patient-days than the staffed bed count can physically
+    // hold over a period — impossible days that no coding review would surface,
+    // and a peak-concurrent census above the staffed beds. Derived (no data regen).
+    getFacilityCapacity: function (id) {
+      var p = providers[id]; if (!p) return null;
+      var tax = p.taxonomyCode || "";
+      var residential = /^3245/.test(tax);   // substance-abuse residential
+      var hospital = /^282N/.test(tax);      // general hospital
+      if (!residential && !hospital) return null;
+      var seed = 0; for (var i = 0; i < id.length; i++) seed = (seed * 31 + id.charCodeAt(i) + 7) >>> 0;
+      var rnd = function () { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
+      var chain = p.role === "chain";
+      var periodDays = 90;
+      var licensedBeds = residential ? 36 + Math.floor(rnd() * 10) : 140 + Math.floor(rnd() * 60);
+      var staffedBeds = Math.round(licensedBeds * (residential ? 0.72 : 0.86));
+      var capacityDays = staffedBeds * periodDays;
+      // a chain residential facility bills beyond what its beds can hold; others sit within
+      var util = chain ? 1.10 + rnd() * 0.09 : 0.58 + rnd() * 0.22;
+      var patientDaysBilled = Math.round(capacityDays * util);
+      var peakConcurrent = chain ? staffedBeds + 4 + Math.floor(rnd() * 5) : Math.round(staffedBeds * (0.68 + rnd() * 0.18));
+      return {
+        periodLabel: "trailing 90 days", periodDays: periodDays,
+        licensedBeds: licensedBeds, staffedBeds: staffedBeds,
+        capacityDays: capacityDays, patientDaysBilled: patientDaysBilled,
+        utilization: Math.round(util * 100),
+        overCapacity: patientDaysBilled > capacityDays,
+        excessDays: Math.max(0, patientDaysBilled - capacityDays),
+        peakConcurrent: peakConcurrent, peakOverStaffed: peakConcurrent > staffedBeds,
+        peakExcess: Math.max(0, peakConcurrent - staffedBeds)
+      };
+    },
+
+    // ---- CPT crosswalk: is THIS code payable billed with THIS modifier? ----
+    // Three reference checks per claim line, the way a coder reads a claim:
+    //   PTP  — NCCI procedure-to-procedure edits. A column-2 code billed with its
+    //          column-1 code on the same day is bundled and not separately payable.
+    //          Modifier indicator 1 means a 59/X{EPSU} modifier may override it *if*
+    //          a distinct service is documented; 0 means no override is permitted.
+    //   MUE  — medically unlikely edits: the max units of a code per day.
+    //   MOD  — is each modifier even valid on this code?
+    // Reference tables are static (no RNG) so the hero scenarios stay byte-stable.
+    CPT_XWALK: {
+      // column-1 code : { column-2 codes bundled into it : NCCI modifier indicator }
+      ptp: {
+        "43239": { "43235": 1 },              // EGD w/ biopsy includes the diagnostic EGD
+        "20610": { "99213": 1, "99214": 1 },  // E/M bundled into the injection unless separately identifiable
+        "90935": { "99213": 1 },
+        "97110": { "97140": 1 },
+        "99283": { "93000": 0 }               // indicator 0 — no override permitted
+      },
+      // max units per code per day
+      mue: { "99211": 1, "99212": 1, "99213": 1, "99214": 1, "99215": 1, "43239": 1, "43235": 1, "90935": 1, "93000": 1, "71046": 2, "97110": 4, "70551": 1, "20610": 2, "99283": 1, "E1390": 1, "D0120": 1, "D1110": 1, "H0018": 30 },
+      mod: {
+        "25": { name: "Significant, separately identifiable E/M service", appliesTo: "em", note: "Valid only on an E/M code billed alongside a procedure the same day." },
+        "59": { name: "Distinct procedural service", appliesTo: "proc", note: "Valid only on a procedure code, and only to override an NCCI PTP edit when a distinct session/site is documented." },
+        "XU": { name: "Unusual non-overlapping service", appliesTo: "proc", note: "NCCI-specific subset of modifier 59." },
+        "XS": { name: "Separate structure", appliesTo: "proc", note: "NCCI-specific subset of modifier 59." },
+        "26": { name: "Professional component", appliesTo: "pctc", note: "Valid only on codes with a professional/technical split." },
+        "TC": { name: "Technical component", appliesTo: "pctc", note: "Valid only on codes with a professional/technical split." },
+        "50": { name: "Bilateral procedure", appliesTo: "bilat", note: "Valid only on bilateral-eligible procedures." },
+        "76": { name: "Repeat procedure by the same physician", appliesTo: "proc", note: "Valid on a repeated procedure the same day." },
+        "91": { name: "Repeat clinical diagnostic laboratory test", appliesTo: "lab", note: "Valid only on clinical lab codes." }
+      },
+      pctc: ["70551", "71046", "93000"],
+      bilat: ["20610", "71046"]
+    },
+    getCptCrosswalk: function (claimId) {
+      var cl = claims[claimId]; if (!cl) return null;
+      var X = this.CPT_XWALK, lines = cl.lines || [];
+      var isEm = function (c) { return /^99/.test(c); };
+      var codes = lines.map(function (l) { return l.cpt; });
+      var overrideMods = ["59", "XU", "XS", "XE", "XP"];
+
+      var rows = lines.map(function (l) {
+        var mods = l.modifiers || [], checks = [], verdict = "pass";
+        var worse = function (v) { var rank = { pass: 0, review: 1, fail: 2 }; if (rank[v] > rank[verdict]) verdict = v; };
+
+        // --- PTP: is this line a column-2 code of another line on the same claim?
+        var ptp = null;
+        Object.keys(X.ptp).forEach(function (c1) {
+          if (codes.indexOf(c1) < 0 || c1 === l.cpt) return;
+          var ind = X.ptp[c1][l.cpt];
+          if (ind === undefined) return;
+          var ovr = mods.filter(function (m) { return overrideMods.indexOf(m) >= 0; });
+          ptp = { column1: c1, column2: l.cpt, indicator: ind, overrides: ovr };
+          if (ind === 0) {
+            ptp.status = "fail";
+            ptp.note = "Bundled into " + c1 + ". Modifier indicator 0 — no modifier may override this edit; the code is not separately payable.";
+            worse("fail");
+          } else if (!ovr.length) {
+            ptp.status = "fail";
+            ptp.note = "Bundled into " + c1 + " and billed without an override modifier — not separately payable in the same session.";
+            worse("fail");
+          } else {
+            ptp.status = "review";
+            ptp.note = "Bundled into " + c1 + ", overridden with modifier " + ovr.join("/") + ". Payable only if the record documents a distinct procedural service — verify before paying.";
+            worse("review");
+          }
+        });
+
+        // --- MUE
+        var limit = X.mue[l.cpt], mue = null;
+        if (limit !== undefined) {
+          mue = { limit: limit, billed: l.units, exceeded: l.units > limit };
+          if (mue.exceeded) { worse("fail"); mue.note = "Billed " + l.units + " units against an MUE of " + limit + " per day."; }
+        }
+
+        // --- modifier validity
+        mods.forEach(function (m) {
+          var def = X.mod[m];
+          if (!def) { checks.push({ mod: m, name: "Unrecognized modifier", valid: false, note: "Not a recognized modifier for this code set." }); worse("fail"); return; }
+          var ok = true, note = def.note;
+          if (def.appliesTo === "em") ok = isEm(l.cpt);
+          else if (def.appliesTo === "proc") ok = !isEm(l.cpt);
+          else if (def.appliesTo === "pctc") ok = X.pctc.indexOf(l.cpt) >= 0;
+          else if (def.appliesTo === "bilat") ok = X.bilat.indexOf(l.cpt) >= 0;
+          else if (def.appliesTo === "lab") ok = false;
+          if (!ok) { note = "Modifier " + m + " is not valid on " + l.cpt + ". " + def.note; worse("fail"); }
+          // a 59-family modifier with no PTP edit to override is an unsupported override
+          else if (overrideMods.indexOf(m) >= 0 && !ptp) {
+            ok = false; worse("review");
+            note = "Modifier " + m + " applied but no NCCI PTP edit exists for " + l.cpt + " on this claim — the override is unnecessary and may mask an unbundling pattern.";
+          }
+          checks.push({ mod: m, name: def.name, valid: ok, note: note });
+        });
+
+        return {
+          cpt: l.cpt, description: l.description, modifiers: mods, units: l.units,
+          ptp: ptp, mue: mue, modChecks: checks, verdict: verdict,
+          flagged: (l.violatesRuleIds || []).length > 0
+        };
+      });
+
+      var fails = rows.filter(function (r) { return r.verdict === "fail"; }).length;
+      var reviews = rows.filter(function (r) { return r.verdict === "review"; }).length;
+      return {
+        source: "CMS NCCI edits + AMA CPT reference", asOf: "NCCI v31.1 · effective 2025-01-01",
+        lines: rows, fails: fails, reviews: reviews,
+        clean: rows.length - fails - reviews,
+        determination: fails ? "Coding edits failed — one or more lines are not separately payable as billed"
+          : reviews ? "Overrides present — payable only if the record documents a distinct service"
+            : "All lines pass NCCI PTP, MUE and modifier validity checks",
+        editsApplied: ["NCCI procedure-to-procedure (PTP) edits", "Medically unlikely edits (MUE) — units per day", "Modifier-to-code validity", "Modifier 59 / X{EPSU} override review"]
       };
     },
 
